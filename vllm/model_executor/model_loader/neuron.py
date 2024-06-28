@@ -80,22 +80,10 @@ class NeuronCasualLM(nn.Module):
             _NEURON_SUPPORTED_MODELS[arch])
         neuronx_module = importlib.import_module(neuronx_module_path)
         neuronx_model_cls = getattr(neuronx_module, neuronx_model_cls_name)
-
-        split_model_dir = f"{model_name_or_path}-split"
-        if os.path.isdir(os.path.join(model_name_or_path,
-                                      "pytorch_model.bin")):
-            split_model_dir = model_name_or_path
-        elif not os.path.exists(f"{model_name_or_path}-split"):
-            hf_model_cls = getattr(transformers, hf_model_cls_name)
-            from transformers_neuronx.module import save_pretrained_split
-
-            hf_model = hf_model_cls.from_pretrained(model_name_or_path,
-                                                    low_cpu_mem_usage=True)
-            save_pretrained_split(hf_model, f"{model_name_or_path}-split")
-
-        self.model = neuronx_model_cls.from_pretrained(split_model_dir,
+        self.model = neuronx_model_cls.from_pretrained(model_name_or_path,
                                                        **kwargs)
         self.model.to_neuron()
+
 
 
 def _get_model_architecture(config: PretrainedConfig) -> str:
