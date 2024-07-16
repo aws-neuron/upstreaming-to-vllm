@@ -1,24 +1,26 @@
-"""Inference-only LLaMA model compatible with HuggingFace weights."""
+"""Inference-only DBRX model compatible with HuggingFace weights."""
 import os
 from typing import List, Optional, Tuple
 
 import torch
 from torch import nn
-from transformers import LlamaConfig
+from transformers import DbrxConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
+import neuronx_distributed as nxd
+
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
-class LlamaForCausalLM(nn.Module):
+class DbrxForCausalLM(nn.Module):
 
     def __init__(
         self,
-        config: LlamaConfig,
+        config: DbrxConfig,
         linear_method=None,
     ) -> None:
         super().__init__()
@@ -65,15 +67,12 @@ class LlamaForCausalLM(nn.Module):
                      load_format: str = "auto",
                      revision: Optional[str] = None,
                      **kwargs):
-
-        from llama2.neuron_modeling_llama import NeuronLlamaForCausalLM, NeuronLlamaConfig, NeuronLlamaModel, preshard_hook_fn
+        # Need to add path of NeuronxDistributed/examples/inference to the PYTHONPATH for a successful import
+        from dbrx.neuron_modeling_dbrx import NeuronDbrxForCausalLM, NeuronDbrxConfig, NeuronDbrxModel, preshard_hook_fn
         from neuronx_distributed.parallel_layers.checkpointing import _invoke_preshard_hook
+        from transformers import DbrxForCausalLM as DbrxForCausalLMHF
 
-
-        from transformers import LlamaForCausalLM as LlamaForCausalLMHF
-        from transformers import AutoConfig
-        config = NeuronLlamaConfig.from_pretrained(model_name_or_path)
-
+        config = NeuronDbrxConfig.from_pretrained(model_name_or_path)
         config.tp_degree = kwargs["tp_degree"]
         config.max_batch_size = kwargs["batch_size"]
         config.torch_dtype = kwargs["amp"]
@@ -84,59 +83,70 @@ class LlamaForCausalLM(nn.Module):
         config.attn_cls = 'NeuronLlamaAttention'
         config.padding_side = "right"
         config.is_continuous_batching = True
+        config.do_sample = True
+        config.top_k = 1
+        config.quantized = False
 
         print(config)
 
-        cpu_mode = os.environ.get("NXD_CPU", None)
-
         if os.environ.get("NXD_DEBUG", None):
             from imp import reload
-
             import logging
 
             reload(logging)
             logging.basicConfig(level=logging.DEBUG)
 
-
-        # need to save to local if the model paht doesn't exist
+        # need to save to local if the model path doesn't exist
         if not os.path.exists(model_name_or_path):
 
-            model = LlamaForCausalLMHF.from_pretrained(model_name_or_path)
+            model = DbrxForCausalLMHF.from_pretrained(model_name_or_path)
 
             saved_path = os.path.join("local-models", model_name_or_path)
             model.save_pretrained(saved_path)
 
             model_name_or_path = saved_path
 
+        cpu_mode = os.environ.get("NXD_CPU", None)
         if cpu_mode is not None:
             config.tp_degree = 1
 
+            self.init_ditributed_env()
+            dbrx_model = NeuronDbrxModel(config)
+            state_dict = NeuronDbrxForCausalLM.get_state_dict(model_name_or_path, config)
+            _invoke_preshard_hook(dbrx_model, state_dict)
+            dbrx_model.load_state_dict(state_dict, strict=False)
 
-            hf_model =  LlamaForCausalLMHF.from_pretrained(model_name_or_path)
+            config.torch_dtype = torch.float32
 
-            model_sd = hf_model.model.state_dict()
-            lm_head_sd = hf_model.lm_head.state_dict()
-            model_sd["lm_head.weight"] = lm_head_sd["weight"]
-            state_dict = model_sd
-
-            llama_model = NeuronLlamaModel(config)
-            _invoke_preshard_hook(preshard_hook_fn, llama_model, state_dict)
-
-            self.model = NeuronLlamaForCausalLM("", config)
+            self.model = NeuronDbrxForCausalLM("", config)
             config.batch_size = config.ctx_batch_size
             config.n_active_tokens = config.n_positions
-
-
-            llama_model_ctx = NeuronLlamaModel.from_pretrained(None, config=config, state_dict=state_dict)
-            llama_model_ctx.lm_head = hf_model.lm_head
+            dbrx_model_ctx = NeuronDbrxModel.from_pretrained(None, config=config, state_dict=state_dict)
 
             config.batch_size = config.tkg_batch_size
             config.n_active_tokens = 1
-            llama_model_tkg = NeuronLlamaModel.from_pretrained(None, config=config, state_dict=state_dict)
-            llama_model_tkg.lm_head = hf_model.lm_head
+            dbrx_model_tkg = NeuronDbrxModel.from_pretrained(None, config=config, state_dict=state_dict)
 
-            self.model.context_encoding_model.model = llama_model_ctx
-            self.model.token_generation_model.model = llama_model_tkg
+            self.model.context_encoding_model.model = dbrx_model_ctx
+            self.model.token_generation_model.model = dbrx_model_tkg
         else:
-            self.model = NeuronLlamaForCausalLM.from_pretrained(model_name_or_path, config)
+            self.model = NeuronDbrxForCausalLM.from_pretrained(model_name_or_path, config)
             self.model.to_neuron()
+
+
+    def init_ditributed_env(self):
+        """
+        Initialize a simple neuronx distributed (Tensor Parallelism) environment, where there TP degree is 1.
+
+        This function is just for running NeuronxDistributed models on CPU to validate correctness.
+        """
+        os.environ["RANK"] = str(0)
+        os.environ["WORLD_SIZE"] = str(1)
+        os.environ["MASTER_ADDR"] = "localhost"
+        os.environ["MASTER_PORT"] = "2024"
+
+        if not torch.distributed.is_initialized():
+            torch.distributed.init_process_group(backend="xla")
+
+        nxd.parallel_layers.parallel_state.destroy_model_parallel()
+        nxd.parallel_layers.parallel_state.initialize_model_parallel(tensor_model_parallel_size=1)
