@@ -1,5 +1,5 @@
 from typing import List, Optional, Tuple
-
+import copy
 import torch
 from torch import nn
 
@@ -10,6 +10,7 @@ from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader.neuron import get_neuron_model
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.utils import is_pin_memory_available, make_tensor_with_pad
+from transformers_neuronx.config import GenerationConfig
 
 logger = init_logger(__name__)
 
@@ -37,6 +38,16 @@ class NeuronModelRunner:
 
         # Lazy initialization.
         self.model: nn.Module  # initialize after load_model.
+        self.model_config.generation_config = GenerationConfig(
+                   max_length=self.scheduler_config.max_model_len,
+                   do_sample=True,
+                   per_batch_line=True,
+                   top_k = [1] * self.scheduler_config.max_num_seqs,
+                   top_p = [1] * self.scheduler_config.max_num_seqs,
+                   temperature = [1] * self.scheduler_config.max_num_seqs,
+                   dynamic=True,
+                   global_top_k=256
+            )
 
     def load_model(self) -> None:
         self.model = get_neuron_model(self.model_config,
@@ -167,6 +178,30 @@ class NeuronModelRunner:
         return (input_tokens, input_positions, input_block_ids,
                 sampling_metadata)
 
+    def update_neuron_generation_config(self, sampling_metadata):
+        # Update Neuron Genetation Config
+        assert self.model_config.generation_config is not None, f"Failed to update generation_config, \
+            current generation config is {self.model_config.generation_config}"
+
+        current_generation_config = self.model_config.generation_config
+        top_k = current_generation_config.top_k.copy()
+        top_p = current_generation_config.top_p.copy()
+        temperature = current_generation_config.temperature.copy()
+        for index, sequence_group_to_sample in enumerate(sampling_metadata.seq_groups):
+            top_k[index] = sequence_group_to_sample.sampling_params.top_k
+            top_p[index] = sequence_group_to_sample.sampling_params.top_p
+            temperature[index] = sequence_group_to_sample.sampling_params.temperature
+
+        # We only call update the generation config is the new config is different
+        # This avoids calling update_generation_config for every token within the same sequence
+        if top_k!= current_generation_config.top_k or top_p != current_generation_config.top_p or temperature != current_generation_config.temperature:
+            current_generation_config.top_k = top_k
+            current_generation_config.top_p = top_p
+            current_generation_config.temperature = temperature
+            self.model_config.generation_config = copy.deepcopy(current_generation_config)
+
+            self.model.model.update_generation_config(current_generation_config)
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -174,6 +209,9 @@ class NeuronModelRunner:
     ) -> Optional[SamplerOutput]:
         (input_tokens, input_positions, input_block_ids, sampling_metadata
          ) = self.prepare_input_tensors(seq_group_metadata_list)
+
+        # Update Neuron's generation configs from sampling_metadata
+        self.update_neuron_generation_config(sampling_metadata)
 
         hidden_states = self.model(
             input_ids=input_tokens,

@@ -2,6 +2,7 @@
 import importlib
 import os
 from typing import Dict, Optional, Tuple
+import copy
 
 import torch
 import torch.nn as nn
@@ -12,7 +13,7 @@ from vllm.config import ModelConfig, ParallelConfig, SchedulerConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import SamplerOutput
+from vllm.sequence import SamplerOutput, SequenceOutput, CompletionSequenceGroupOutput, Logprob
 
 TORCH_DTYPE_TO_NEURON_AMP = {
     "auto": "f32",
@@ -71,7 +72,18 @@ class NeuronCasualLM(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
+        hidden_states = logits.flatten()
+        next_tokens = []
+        sample_idx = 0
+        #print(f"sampling_metadata: {sampling_metadata}")
+        for seq_group in sampling_metadata.seq_groups:
+            samples = []
+            for seq_id in seq_group.seq_ids:
+                token_id = hidden_states[sample_idx].item()
+                samples.append(SequenceOutput(parent_seq_id=seq_id, output_token=token_id,
+                                                logprobs={token_id: Logprob(token_id)}))
+                sample_idx += 1
+            next_tokens.append(CompletionSequenceGroupOutput(samples=samples, prompt_logprobs=None))
         return next_tokens
 
     def load_weights(self, model_name_or_path: str, **kwargs):
@@ -106,9 +118,13 @@ def get_neuron_model(model_config: ModelConfig,
     # Create a model instance.
     model = NeuronCasualLM(model_config.hf_config)
 
+    on_dev_sampling_config = copy.deepcopy(model_config.generation_config)
+
     continuous_batching_config = ContinuousBatchingConfig(
         batch_size_for_shared_caches=scheduler_config.max_num_seqs)
+
     neuron_config = NeuronConfig(
+        on_device_generation=on_dev_sampling_config,
         continuous_batching=continuous_batching_config)
 
     # Load the weights from the cached or downloaded files.
