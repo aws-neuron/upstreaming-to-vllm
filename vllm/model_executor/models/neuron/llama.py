@@ -78,6 +78,9 @@ class LlamaForCausalLM(nn.Module):
         config.max_batch_size = kwargs["batch_size"]
         config.torch_dtype = kwargs["amp"]
         config.n_positions = kwargs["n_positions"][-1]
+        config.max_length = config.n_positions
+        config.max_context_length = kwargs["context_length_estimate"][-1]
+        config.max_new_tokens = config.max_length - config.max_context_length
         config.buckets = [config.n_positions]
         config.tkg_batch_size = kwargs["batch_size"]
         config.ctx_batch_size = 1

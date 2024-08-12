@@ -59,7 +59,7 @@ def get_model(model_config: ModelConfig, device_config: DeviceConfig,
         model_config.revision,
         tp_degree=parallel_config.neuron_tp_degree,
         amp=dtype_converter(model_config.dtype),
-        context_length_estimate=[scheduler_config.max_model_len],
+        context_length_estimate=[scheduler_config.max_model_len // 2],
         n_positions=[scheduler_config.max_model_len],
         batch_size=scheduler_config.max_num_seqs)
 
