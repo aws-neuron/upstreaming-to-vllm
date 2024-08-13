@@ -84,7 +84,8 @@ class NeuronCasualLM(nn.Module):
                                                 logprobs={token_id: Logprob(token_id)}))
                 sample_idx += 1
             next_tokens.append(CompletionSequenceGroupOutput(samples=samples, prompt_logprobs=None))
-        return next_tokens
+        returned_output = SamplerOutput(outputs=next_tokens)
+        return returned_output
 
     def load_weights(self, model_name_or_path: str, **kwargs):
         arch = _get_model_architecture(self.config)
