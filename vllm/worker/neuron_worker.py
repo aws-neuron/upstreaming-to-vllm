@@ -3,14 +3,20 @@ from typing import List, Tuple
 
 import torch
 import torch.distributed
-
+import os
+import datetime
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
 from vllm.model_executor import set_random_seed
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.worker.neuron_model_runner import NeuronModelRunner
 from vllm.worker.worker_base import LoraNotSupportedWorkerBase
+from vllm.distributed.communication_op import (
+    broadcast_tensor_dict)
+from vllm.distributed.parallel_state import init_distributed_environment
+from vllm.logger import init_logger
 
+logger = init_logger(__name__)
 
 class NeuronWorker(LoraNotSupportedWorkerBase):
     """A worker class that executes the model on a group of neuron cores.
@@ -34,9 +40,24 @@ class NeuronWorker(LoraNotSupportedWorkerBase):
             from vllm.utils import init_cached_hf_modules
             init_cached_hf_modules()
 
+        self.is_driver_worker = False
+        self.rank = None
+        self.multi_node_inference = False
+        if os.getenv("NEURON_MULTI_NODE", None) is not None:
+            """Initialize the distributed environment."""
+            self.multi_node_inference = True
+            if os.getenv("NEURON_RANK_ID", None) is not None:
+                self.rank = int(os.getenv("NEURON_RANK_ID"))
+                if self.rank == 0:
+                    self.is_driver_worker = True
+
+        # Initialize the distributed environment.
+        init_distributed_environment(self.parallel_config, self.rank)
+
         self.model_runner = NeuronModelRunner(model_config, parallel_config,
                                               scheduler_config, device_config)
-
+        
+                
     def init_device(self) -> None:
         # Set random seed.
         set_random_seed(self.model_config.seed)
@@ -76,13 +97,25 @@ class NeuronWorker(LoraNotSupportedWorkerBase):
     @torch.inference_mode()
     def execute_model(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
+        seq_group_metadata_list: List[SequenceGroupMetadata] = None,
     ) -> List[SamplerOutput]:
+        if self.multi_node_inference:
+            if self.is_driver_worker: # master node
+                data = {
+                    "seq_group_metadata_list": seq_group_metadata_list
+                }
+                broadcast_tensor_dict(data, src=0)
+            else: # worker node
+                data = broadcast_tensor_dict(src=0)
+                seq_group_metadata_list = data["seq_group_metadata_list"]
+
         num_seq_groups = len(seq_group_metadata_list)
 
         # If there is no input, we don't need to execute the model.
         if num_seq_groups == 0:
             return []
+
+
 
         output = self.model_runner.execute_model(seq_group_metadata_list)
 

@@ -20,6 +20,9 @@ from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.sampling_params import SamplingParams
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import random_uuid
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds.
 app = FastAPI()
@@ -79,10 +82,13 @@ async def generate(request: Request) -> Response:
     return JSONResponse(ret)
 
 
-if __name__ == "__main__":
+def initialize_worker():
+    global engine
+    logger.info("Starting api server")
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", type=str, default=None)
     parser.add_argument("--port", type=int, default=8000)
+
     parser.add_argument("--ssl-keyfile", type=str, default=None)
     parser.add_argument("--ssl-certfile", type=str, default=None)
     parser.add_argument("--ssl-ca-certs",
@@ -103,10 +109,14 @@ if __name__ == "__main__":
     parser.add_argument("--log-level", type=str, default="debug")
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
+
+    logger.info(f"Initializing vLLM(Neuron Multinode) with the following {args=}")
     engine_args = AsyncEngineArgs.from_cli_args(args)
     engine = AsyncLLMEngine.from_engine_args(
         engine_args, usage_context=UsageContext.API_SERVER)
+    return args, engine
 
+def run_master(args):
     app.root_path = args.root_path
     uvicorn.run(app,
                 host=args.host,
