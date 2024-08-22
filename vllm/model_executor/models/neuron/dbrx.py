@@ -4,7 +4,7 @@ from typing import List, Optional, Tuple
 
 import torch
 from torch import nn
-from transformers import DbrxConfig
+from transformers import AutoConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.sampler import Sampler
@@ -20,7 +20,7 @@ class DbrxForCausalLM(nn.Module):
 
     def __init__(
         self,
-        config: DbrxConfig,
+        config: AutoConfig,
         linear_method=None,
     ) -> None:
         super().__init__()
@@ -39,7 +39,7 @@ class DbrxForCausalLM(nn.Module):
 
 
         with torch.inference_mode():
-            block_size = self.model.config.n_positions
+            block_size = self.model.neuron_config.n_positions
             if input_metadata.is_prompt:
                 seq_ids = input_metadata.slot_mapping[:, 0] // block_size
             else:
@@ -68,11 +68,15 @@ class DbrxForCausalLM(nn.Module):
                      revision: Optional[str] = None,
                      **kwargs):
         # Need to add path of NeuronxDistributed/examples/inference to the PYTHONPATH for a successful import
-        from dbrx.neuron_modeling_dbrx import NeuronDbrxForCausalLM, NeuronDbrxConfig, NeuronDbrxModel, preshard_hook_fn
+        from dbrx.neuron_modeling_dbrx import NeuronDbrxForCausalLM, NeuronDbrxConfig, NeuronDbrxModel
         from neuronx_distributed.parallel_layers.checkpointing import _invoke_preshard_hook
         from transformers import DbrxForCausalLM as DbrxForCausalLMHF
 
-        config = NeuronDbrxConfig.from_pretrained(model_name_or_path)
+        hf_config = AutoConfig.from_pretrained(model_name_or_path)
+        hf_config.do_sample=True
+        hf_config.num_beams=1
+
+        config = NeuronDbrxConfig(hf_config)
         config.tp_degree = kwargs["tp_degree"]
         config.max_batch_size = kwargs["batch_size"]
         config.torch_dtype = kwargs["amp"]
@@ -83,8 +87,6 @@ class DbrxForCausalLM(nn.Module):
         config.attn_cls = 'NeuronLlamaAttention'
         config.padding_side = "right"
         config.is_continuous_batching = True
-        config.do_sample = True
-        config.top_k = 1
         config.quantized = False
 
         print(config)
@@ -131,7 +133,7 @@ class DbrxForCausalLM(nn.Module):
             self.model.token_generation_model.model = dbrx_model_tkg
         else:
             self.model = NeuronDbrxForCausalLM.from_pretrained(model_name_or_path, config)
-            self.model.to_neuron()
+            self.model.to_neuron("./neuron_nxd_model")
 
 
     def init_ditributed_env(self):

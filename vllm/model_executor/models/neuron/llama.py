@@ -4,7 +4,7 @@ from typing import List, Optional, Tuple
 
 import torch
 from torch import nn
-from transformers import LlamaConfig
+from transformers import AutoConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.sampler import Sampler
@@ -18,7 +18,7 @@ class LlamaForCausalLM(nn.Module):
 
     def __init__(
         self,
-        config: LlamaConfig,
+        config: AutoConfig,
         linear_method=None,
     ) -> None:
         super().__init__()
@@ -37,7 +37,7 @@ class LlamaForCausalLM(nn.Module):
 
 
         with torch.inference_mode():
-            block_size = self.model.config.n_positions
+            block_size = self.model.neuron_config.n_positions
             if input_metadata.is_prompt:
                 seq_ids = input_metadata.slot_mapping[:, 0] // block_size
             else:
@@ -66,14 +66,14 @@ class LlamaForCausalLM(nn.Module):
                      revision: Optional[str] = None,
                      **kwargs):
 
-        from llama2.neuron_modeling_llama import NeuronLlamaForCausalLM, NeuronLlamaConfig, NeuronLlamaModel, preshard_hook_fn
+        from llama2.neuron_modeling_llama import NeuronLlamaForCausalLM, NeuronLlamaModel
+        from modules.config import NeuronConfig
         from neuronx_distributed.parallel_layers.checkpointing import _invoke_preshard_hook
-
-
         from transformers import LlamaForCausalLM as LlamaForCausalLMHF
-        from transformers import AutoConfig
-        config = NeuronLlamaConfig.from_pretrained(model_name_or_path)
 
+        hf_config = AutoConfig.from_pretrained(model_name_or_path)
+
+        config = NeuronConfig(hf_config)
         config.tp_degree = kwargs["tp_degree"]
         config.max_batch_size = kwargs["batch_size"]
         config.torch_dtype = kwargs["amp"]
@@ -111,7 +111,6 @@ class LlamaForCausalLM(nn.Module):
         if cpu_mode is not None:
             config.tp_degree = 1
 
-
             hf_model =  LlamaForCausalLMHF.from_pretrained(model_name_or_path)
 
             model_sd = hf_model.model.state_dict()
@@ -120,7 +119,7 @@ class LlamaForCausalLM(nn.Module):
             state_dict = model_sd
 
             llama_model = NeuronLlamaModel(config)
-            _invoke_preshard_hook(preshard_hook_fn, llama_model, state_dict)
+            _invoke_preshard_hook(llama_model, state_dict)
 
             self.model = NeuronLlamaForCausalLM("", config)
             config.batch_size = config.ctx_batch_size
@@ -139,4 +138,4 @@ class LlamaForCausalLM(nn.Module):
             self.model.token_generation_model.model = llama_model_tkg
         else:
             self.model = NeuronLlamaForCausalLM.from_pretrained(model_name_or_path, config)
-            self.model.to_neuron()
+            self.model.to_neuron("./neuron_nxd_model")
