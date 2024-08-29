@@ -51,8 +51,8 @@ class NeuronWorker(LoraNotSupportedWorkerBase):
                 if self.rank == 0:
                     self.is_driver_worker = True
 
-        # Initialize the distributed environment.
-        init_distributed_environment(self.parallel_config, self.rank)
+            # Initialize the distributed environment.
+            init_distributed_environment(self.parallel_config, self.rank)
 
         self.model_runner = NeuronModelRunner(model_config, parallel_config,
                                               scheduler_config, device_config)
