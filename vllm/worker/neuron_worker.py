@@ -6,7 +6,7 @@ import torch.distributed
 import os
 import datetime
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig)
+                         ParallelConfig, SchedulerConfig, SpeculativeConfig)
 from vllm.model_executor import set_random_seed
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.worker.neuron_model_runner import NeuronModelRunner
@@ -29,12 +29,14 @@ class NeuronWorker(LoraNotSupportedWorkerBase):
         scheduler_config: SchedulerConfig,
         device_config: DeviceConfig,
         cache_config: CacheConfig,
+        speculation_config: SpeculativeConfig,
     ) -> None:
         self.model_config = model_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.device_config = device_config
         self.cache_config = cache_config
+        self.speculation_config = speculation_config
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils import init_cached_hf_modules
@@ -55,7 +57,8 @@ class NeuronWorker(LoraNotSupportedWorkerBase):
             init_distributed_environment(self.parallel_config, self.rank)
 
         self.model_runner = NeuronModelRunner(model_config, parallel_config,
-                                              scheduler_config, device_config)
+                                              scheduler_config, device_config,
+                                              speculation_config)
         
                 
     def init_device(self) -> None:
@@ -119,9 +122,9 @@ class NeuronWorker(LoraNotSupportedWorkerBase):
 
         output = self.model_runner.execute_model(seq_group_metadata_list)
 
-        # Neuron worker only supports single-step output. Wrap the output in a
-        # list to conform to interface.
-        return [output]
+        if self.speculation_config is None:
+            return [output]
+        return output
 
     def get_cache_block_size_bytes(self) -> int:
         """Determine the size in bytes of a cache block.

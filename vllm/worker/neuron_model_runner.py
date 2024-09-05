@@ -2,12 +2,13 @@ from typing import List, Optional, Tuple
 import copy
 import torch
 from torch import nn
+from typing import Sequence as GenericSequence
 
 from vllm.config import (DeviceConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig)
+                         SchedulerConfig, SpeculativeConfig)
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
-from vllm.model_executor.model_loader.neuron import get_neuron_model
+from vllm.model_executor.model_loader.neuron import get_neuron_model, get_neuron_speculation_model
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.utils import is_pin_memory_available, make_tensor_with_pad
 from transformers_neuronx.config import GenerationConfig
@@ -23,10 +24,12 @@ class NeuronModelRunner:
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
         device_config: DeviceConfig,
+        speculation_config: SpeculativeConfig,
     ):
         self.model_config = model_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
+        self.speculation_config = speculation_config
 
         if model_config is not None and model_config.get_sliding_window():
             logger.warning("Sliding window is not supported on Neuron. "
@@ -48,11 +51,32 @@ class NeuronModelRunner:
                    dynamic=True,
                    global_top_k=256
             )
+        if self.speculation_config is not None:
+            self.speculation_config.draft_model_config.generation_config = GenerationConfig(
+                max_length=self.scheduler_config.max_model_len,
+                do_sample=True,
+                per_batch_line=True,
+                top_k = [1] * self.scheduler_config.max_num_seqs,
+                top_p = [1] * self.scheduler_config.max_num_seqs,
+                temperature = [1] * self.scheduler_config.max_num_seqs,
+                dynamic=True,
+                global_top_k=256
+            )
 
     def load_model(self) -> None:
-        self.model = get_neuron_model(self.model_config,
-                                      parallel_config=self.parallel_config,
-                                      scheduler_config=self.scheduler_config)
+        if self.speculation_config is None:
+            self.model = get_neuron_model(
+                self.model_config,
+                parallel_config=self.parallel_config,
+                scheduler_config=self.scheduler_config
+            )
+        else:
+            self.model = get_neuron_speculation_model(
+                self.model_config,
+                parallel_config=self.parallel_config,
+                scheduler_config=self.scheduler_config,
+                speculation_config=self.speculation_config
+            )
 
     def _prepare_prompt(
         self,
@@ -206,7 +230,7 @@ class NeuronModelRunner:
     def execute_model(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> Optional[SamplerOutput]:
+    ) -> Optional[GenericSequence[SamplerOutput]]:
         (input_tokens, input_positions, input_block_ids, sampling_metadata
          ) = self.prepare_input_tensors(seq_group_metadata_list)
 

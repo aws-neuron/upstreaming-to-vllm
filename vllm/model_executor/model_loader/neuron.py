@@ -1,7 +1,7 @@
 """Utilities for selecting and loading neuron models."""
 import importlib
 import os
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, List
 import copy
 
 import torch
@@ -9,11 +9,13 @@ import torch.nn as nn
 import transformers
 from transformers import PretrainedConfig
 
-from vllm.config import ModelConfig, ParallelConfig, SchedulerConfig
+from vllm.config import ModelConfig, ParallelConfig, SchedulerConfig, SpeculativeConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput, SequenceOutput, CompletionSequenceGroupOutput, Logprob
+
+from transformers_neuronx.fused_speculation import FusedSpeculativeDecoder
 
 TORCH_DTYPE_TO_NEURON_AMP = {
     "auto": "f32",
@@ -98,6 +100,51 @@ class NeuronCasualLM(nn.Module):
         self.model.to_neuron()
 
 
+class NeuronSpeculationCasualLM(nn.Module):
+
+    def __init__(
+        self,
+        speculation_model: FusedSpeculativeDecoder,
+    ) -> None:
+        super().__init__()
+        self.model = speculation_model
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        input_block_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        tokens, counts = self.model.speculative_iteration(input_ids, positions, input_block_ids)
+        return tokens
+
+    def compute_logits(self, hidden_states: torch.Tensor,
+                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+        return hidden_states
+
+    def sample(
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[List[SamplerOutput]]:
+        batch_size, num_steps = logits.shape
+        seq_ids = [seq_id for sg in sampling_metadata.seq_groups for seq_id in sg.seq_ids]
+        # Organize input tensors by step instead of by sequence.
+        accepted_token_ids_by_step = logits.transpose(0, 1)
+        accepted_token_ids_by_step[accepted_token_ids_by_step==self.model.pad_token_id]=-1
+
+        sampler_output_list = []
+        for step_index in range(num_steps):
+            if all(token_id == -1 for token_id in accepted_token_ids_by_step[step_index]):
+                break
+            step_output_token_ids = []
+            for sequence_index in range(batch_size):
+                token_id = accepted_token_ids_by_step[step_index][sequence_index]
+                step_output_token_ids.append(CompletionSequenceGroupOutput(samples=[SequenceOutput(parent_seq_id=seq_ids[sequence_index], output_token=token_id, logprobs={token_id: Logprob(token_id)})], prompt_logprobs=None))
+            sampler_output_list.append(
+                SamplerOutput(outputs=step_output_token_ids))
+        return sampler_output_list
+
 
 def _get_model_architecture(config: PretrainedConfig) -> str:
     architectures = getattr(config, "architectures", [])
@@ -139,3 +186,66 @@ def get_neuron_model(model_config: ModelConfig,
         batch_size=scheduler_config.max_num_seqs)
 
     return model.eval()
+
+
+def get_neuron_speculation_model(model_config: ModelConfig,
+                                 parallel_config: ParallelConfig,
+                                 scheduler_config: SchedulerConfig,
+                                 speculation_config: SpeculativeConfig) -> None:
+    from transformers_neuronx.config import (ContinuousBatchingConfig,
+                                             NeuronConfig)
+
+    # Create target model instance.
+    target_model = NeuronCasualLM(model_config.hf_config)
+
+    on_dev_sampling_config = copy.deepcopy(model_config.generation_config)
+
+    continuous_batching_config = ContinuousBatchingConfig(
+        batch_size_for_shared_caches=scheduler_config.max_num_seqs)
+
+    neuron_config = NeuronConfig(
+        on_device_generation=on_dev_sampling_config,
+        on_device_embedding=True,
+        continuous_batching=continuous_batching_config)
+
+    # Load the weights from the cached or downloaded files.
+    target_model.load_weights(
+        model_config.model,
+        tp_degree=parallel_config.tensor_parallel_size,
+        amp=TORCH_DTYPE_TO_NEURON_AMP[model_config.dtype],
+        neuron_config=neuron_config,
+        context_length_estimate=[scheduler_config.max_model_len],
+        n_positions=[scheduler_config.max_model_len],
+        batch_size=scheduler_config.max_num_seqs)
+
+    target_model.eval()
+
+    draft_model = NeuronCasualLM(speculation_config.draft_model_config.hf_config)
+
+    on_dev_sampling_config = copy.deepcopy(speculation_config.draft_model_config.generation_config)
+
+    continuous_batching_config = ContinuousBatchingConfig(
+        batch_size_for_shared_caches=scheduler_config.max_num_seqs)
+    
+    neuron_config = NeuronConfig(
+        on_device_generation=on_dev_sampling_config,
+        on_device_embedding=True,
+        continuous_batching=continuous_batching_config)
+
+    # Load the weights from the cached or downloaded files.
+    draft_model.load_weights(
+        speculation_config.draft_model_config.model,
+        tp_degree=speculation_config.draft_parallel_config.tensor_parallel_size,
+        amp=TORCH_DTYPE_TO_NEURON_AMP[speculation_config.draft_model_config.dtype],
+        neuron_config=neuron_config,
+        context_length_estimate=[scheduler_config.max_model_len],
+        n_positions=[scheduler_config.max_model_len],
+        batch_size=scheduler_config.max_num_seqs)
+    
+    draft_model.eval()
+    
+    speculation_model = FusedSpeculativeDecoder(draft_model.model, target_model.model, speculation_config.num_speculative_tokens)
+    speculation_model.to_neuron()
+
+    return NeuronSpeculationCasualLM(speculation_model)
+
