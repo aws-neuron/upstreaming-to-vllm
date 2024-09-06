@@ -8,7 +8,8 @@ from vllm.config import (DeviceConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, SpeculativeConfig)
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
-from vllm.model_executor.model_loader.neuron import get_neuron_model, get_neuron_speculation_model
+from vllm.model_executor.model_loader.neuron import (get_neuron_model,
+    get_neuron_speculation_model, get_neuron_eagle_speculation_model)
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.utils import is_pin_memory_available, make_tensor_with_pad
 from transformers_neuronx.config import GenerationConfig
@@ -69,6 +70,13 @@ class NeuronModelRunner:
                 self.model_config,
                 parallel_config=self.parallel_config,
                 scheduler_config=self.scheduler_config
+            )
+        elif self.speculation_config.speculative_token_tree is not None:
+            self.model = get_neuron_eagle_speculation_model(
+                self.model_config,
+                parallel_config=self.parallel_config,
+                scheduler_config=self.scheduler_config,
+                speculation_config=self.speculation_config
             )
         else:
             self.model = get_neuron_speculation_model(

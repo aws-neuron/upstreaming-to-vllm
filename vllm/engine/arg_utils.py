@@ -94,6 +94,7 @@ class EngineArgs:
     # Speculative decoding configuration.
     speculative_model: Optional[str] = None
     num_speculative_tokens: Optional[int] = None
+    speculative_token_tree: Optional[str] = None
     speculative_max_model_len: Optional[int] = None
     speculative_disable_by_batch_size: Optional[int] = None
     ngram_prompt_lookup_max: Optional[int] = None
@@ -533,7 +534,12 @@ class EngineArgs:
             default=EngineArgs.num_speculative_tokens,
             help='The number of speculative tokens to sample from '
             'the draft model in speculative decoding.')
-
+        parser.add_argument(
+            '--speculative-token-tree',
+            type=nullable_str,
+            default=EngineArgs.speculative_token_tree,
+            help='The token tree definition used with speculation.'
+        )
         parser.add_argument(
             '--speculative-max-model-len',
             type=int,
@@ -676,6 +682,7 @@ class EngineArgs:
             target_dtype=self.dtype,
             speculative_model=self.speculative_model,
             num_speculative_tokens=self.num_speculative_tokens,
+            speculative_token_tree=self.speculative_token_tree,
             speculative_disable_by_batch_size=self.
             speculative_disable_by_batch_size,
             speculative_max_model_len=self.speculative_max_model_len,

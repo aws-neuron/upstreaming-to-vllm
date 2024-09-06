@@ -1,6 +1,7 @@
 """Utilities for selecting and loading neuron models."""
 import importlib
 import os
+import ast
 from typing import Dict, Optional, Tuple, List
 import copy
 
@@ -104,7 +105,7 @@ class NeuronSpeculationCasualLM(nn.Module):
 
     def __init__(
         self,
-        speculation_model: FusedSpeculativeDecoder,
+        speculation_model,
     ) -> None:
         super().__init__()
         self.model = speculation_model
@@ -249,3 +250,76 @@ def get_neuron_speculation_model(model_config: ModelConfig,
 
     return NeuronSpeculationCasualLM(speculation_model)
 
+
+def get_neuron_eagle_speculation_model(model_config: ModelConfig,
+                                       parallel_config: ParallelConfig,
+                                       scheduler_config: SchedulerConfig,
+                                       speculation_config: SpeculativeConfig) -> None:
+    from transformers_neuronx.config import (ContinuousBatchingConfig,
+                                             NeuronConfig)
+    from transformers_neuronx import Layout
+    from transformers_neuronx.eagle_speculative import EagleSpeculativeDecoder
+
+    # Create target model instance.
+    target_model = NeuronCasualLM(model_config.hf_config)
+
+    on_dev_sampling_config = copy.deepcopy(model_config.generation_config)
+
+    continuous_batching_config = ContinuousBatchingConfig(
+        batch_size_for_shared_caches=scheduler_config.max_num_seqs)
+
+    neuron_config = NeuronConfig(
+        is_eagle_target=True,
+        fuse_qkv=True,
+        attention_layout=Layout.BSH,
+        on_device_embedding=True,
+        continuous_batching=continuous_batching_config,
+        on_device_generation=on_dev_sampling_config
+    )
+
+    # Load the weights from the cached or downloaded files.
+    target_model.load_weights(
+        model_config.model,
+        tp_degree=parallel_config.tensor_parallel_size,
+        amp=TORCH_DTYPE_TO_NEURON_AMP[model_config.dtype],
+        neuron_config=neuron_config,
+        context_length_estimate=[scheduler_config.max_model_len],
+        n_positions=[scheduler_config.max_model_len],
+        batch_size=scheduler_config.max_num_seqs)
+
+    target_model.eval()
+
+    draft_model = NeuronCasualLM(speculation_config.draft_model_config.hf_config)
+
+    on_dev_sampling_config = copy.deepcopy(speculation_config.draft_model_config.generation_config)
+
+    continuous_batching_config = ContinuousBatchingConfig(
+        batch_size_for_shared_caches=scheduler_config.max_num_seqs)
+
+    draft_neuron_config = NeuronConfig(
+        is_eagle_draft=True,
+        fuse_qkv=True,
+        attention_layout=Layout.BSH,
+        on_device_embedding=True,
+        continuous_batching=continuous_batching_config,
+        on_device_generation=on_dev_sampling_config
+    )
+
+    # Load the weights from the cached or downloaded files.
+    draft_model.load_weights(
+        speculation_config.draft_model_config.model,
+        tp_degree=speculation_config.draft_parallel_config.tensor_parallel_size,
+        amp=TORCH_DTYPE_TO_NEURON_AMP[speculation_config.draft_model_config.dtype],
+        neuron_config=draft_neuron_config,
+        context_length_estimate=[scheduler_config.max_model_len],
+        n_positions=[scheduler_config.max_model_len],
+        batch_size=scheduler_config.max_num_seqs)
+
+    draft_model.eval()
+
+    token_tree: Dict[int, List[int]] = ast.literal_eval(speculation_config.speculative_token_tree)
+
+    speculation_model = EagleSpeculativeDecoder(draft_model.model, target_model.model, token_tree=token_tree)
+    speculation_model.to_neuron()
+
+    return NeuronSpeculationCasualLM(speculation_model)
