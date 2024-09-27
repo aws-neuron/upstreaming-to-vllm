@@ -37,8 +37,8 @@ class NeuronExecutor(ExecutorBase):
             local_rank=0,
             rank=0,
             distributed_init_method=distributed_init_method)
-        self.driver_worker.init_device()
         self.driver_worker.load_model()
+        self.driver_worker.init_device()
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Determine the number of available KV blocks by invoking the

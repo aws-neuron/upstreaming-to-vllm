@@ -330,6 +330,20 @@ def is_openvino() -> bool:
 
 @lru_cache(maxsize=None)
 def is_neuron() -> bool:
+    return is_transformers_neuronx() or is_neuronx_distributed_inference()
+
+
+@lru_cache(maxsize=None)
+def is_neuronx_distributed_inference() -> bool:
+    try:
+        import neuronx_distributed_inference
+    except ImportError:
+        neuronx_distributed_inference = None
+    return neuronx_distributed_inference is not None
+
+
+@lru_cache(maxsize=None)
+def is_transformers_neuronx() -> bool:
     try:
         import transformers_neuronx
     except ImportError:
