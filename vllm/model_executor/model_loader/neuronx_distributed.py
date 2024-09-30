@@ -107,8 +107,7 @@ def _get_model_architecture(config: PretrainedConfig) -> str:
 def _get_default_neuron_config(model_config: ModelConfig,
                                parallel_config: ParallelConfig,
                                scheduler_config: SchedulerConfig):
-    from neuronx_distributed_inference.models.config import NeuronConfig
-    neuron_config = NeuronConfig(
+    neuron_config = dict(
         tp_degree=parallel_config.tensor_parallel_size,
         ctx_batch_size=1,
         batch_size=scheduler_config.max_num_seqs,
@@ -122,12 +121,21 @@ def _get_default_neuron_config(model_config: ModelConfig,
     )
     return neuron_config
 
+def _get_neuron_config_after_override(default_neuron_config,
+                                      overridden_neuron_config):
+    from neuronx_distributed_inference.models.config import NeuronConfig
+    overridden_neuron_config = overridden_neuron_config or {}
+    default_neuron_config.update(overridden_neuron_config)
+    return NeuronConfig(**default_neuron_config)
+
 def get_neuron_model(model_config: ModelConfig,
                      parallel_config: ParallelConfig,
                      scheduler_config: SchedulerConfig) -> nn.Module:
     model = NeuronCasualLM(model_config.hf_config)
     default_neuron_config_args = _get_default_neuron_config(
         model_config, parallel_config, scheduler_config)
+    neuron_config = _get_neuron_config_after_override(default_neuron_config_args,
+        model_config.override_neuron_config)
     model.load_weights(model_config.model,
-                       neuron_config=default_neuron_config_args,)
+                       neuron_config=neuron_config,)
     return model.eval()
