@@ -12,8 +12,6 @@ from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.model_executor import set_random_seed
 from vllm.sequence import ExecuteModelRequest
-from vllm.worker.neuron_model_runner import NeuronModelRunner
-from vllm.worker.neuronx_distributed_model_runner import NeuronxDistributedModelRunner
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase,
                                      LoraNotSupportedWorkerBase, WorkerInput)
 from vllm.utils import is_transformers_neuronx, is_neuronx_distributed_inference
@@ -53,9 +51,11 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         neuron_framework = self._get_neuron_framework_to_use()
 
         if neuron_framework == NeuronFramework.TRANSFORMERS_NEURONX:
+            from vllm.worker.neuron_model_runner import NeuronModelRunner
             self.model_runner: NeuronModelRunner = NeuronModelRunner(
                 model_config, parallel_config, scheduler_config, device_config)
         elif neuron_framework == NeuronFramework.NEURONX_DISTRIBUTED_INFERENCE:
+            from vllm.worker.neuronx_distributed_model_runner import NeuronxDistributedModelRunner
             self.model_runner: NeuronxDistributedModelRunner = NeuronxDistributedModelRunner(
                 model_config, parallel_config, scheduler_config, device_config)
         else:
