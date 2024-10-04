@@ -5,14 +5,17 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
-from transformers import PretrainedConfig
+from transformers import AutoModelForCausalLM, PretrainedConfig
 
 from vllm.config import ModelConfig, ParallelConfig, SchedulerConfig
+from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 
 from neuronx_distributed_inference.utils.hf_adapter import load_pretrained_config
+
+logger = init_logger(__name__)
 
 TORCH_DTYPE_TO_NEURON_AMP = {
     "auto": "float32",
@@ -31,6 +34,10 @@ TORCH_DTYPE_TO_NEURON_AMP = {
 _NEURON_SUPPORTED_MODELS: Dict[str, Tuple[str, str]] = {
     "LlamaForCausalLM": ("neuronx_distributed_inference.models.llama.modeling_llama",
                          "NeuronLlamaForCausalLM"),
+    "DbrxForCausalLM": ("neuronx_distributed_inference.models.dbrx.modeling_dbrx",
+                         "NeuronDbrxForCausalLM"),
+    "MixtralForCausalLM": ("neuronx_distributed_inference.models.modeling_mixtral",
+                         "NeuronMixtralForCausalLM"),
 }
 
 class NeuronCasualLM(nn.Module):
@@ -79,20 +86,33 @@ class NeuronCasualLM(nn.Module):
             _NEURON_SUPPORTED_MODELS[arch])
         neuronx_module = importlib.import_module(neuronx_module_path)
         neuronx_model_cls = getattr(neuronx_module, neuronx_model_cls_name)
-        neuron_config = kwargs['neuron_config']
+        neuron_config = neuronx_model_cls.get_neuron_config_cls()(**kwargs['neuron_config'])
         self.config.neuron_config = neuron_config
         config = neuronx_model_cls.get_config_cls()(
             neuron_config, load_config=load_pretrained_config(model_name_or_path)
         )
-        self.model = neuronx_model_cls(model_name_or_path, config)
-        compiled_model_path = os.path.join(model_name_or_path,
-            f"neuron-compiled-artifacts/{hashlib.md5(config.to_json_string().encode('utf-8')).hexdigest()}/")
+        if os.getenv("NEURON_COMPILED_ARTIFACTS") is not None:
+            compiled_model_path = os.getenv("NEURON_COMPILED_ARTIFACTS")
+        elif os.path.exists(model_name_or_path):
+            compiled_model_path = os.path.join(model_name_or_path,
+                f"neuron-compiled-artifacts/{hashlib.md5(config.to_json_string().encode('utf-8')).hexdigest()}/")
+        else:
+            compiled_model_path = os.path.join("local-models", model_name_or_path,
+                f"neuron-compiled-artifacts/{hashlib.md5(config.to_json_string().encode('utf-8')).hexdigest()}/")
         try:
+            self.model = neuronx_model_cls(compiled_model_path)
             self.model.load(compiled_model_path)
-        except ValueError:
-            self.model.compile(compiled_model_path)
-            self.model.load(compiled_model_path)
-
+            return
+        except (FileNotFoundError, ValueError):
+            logger.warning(f"Failed to load the model from {compiled_model_path}, Recompiling...")
+        if not os.path.exists(model_name_or_path):
+            hf_model = AutoModelForCausalLM.from_pretrained(model_name_or_path)
+            saved_path = os.path.join("local-models", model_name_or_path)
+            hf_model.save_pretrained(saved_path)
+            model_name_or_path = saved_path
+        self.model = neuronx_model_cls(model_name_or_path, config)
+        self.model.compile(compiled_model_path)
+        self.model.load(compiled_model_path)
 
 def _get_model_architecture(config: PretrainedConfig) -> str:
     architectures = getattr(config, "architectures", [])
@@ -123,10 +143,9 @@ def _get_default_neuron_config(model_config: ModelConfig,
 
 def _get_neuron_config_after_override(default_neuron_config,
                                       overridden_neuron_config):
-    from neuronx_distributed_inference.models.config import NeuronConfig
     overridden_neuron_config = overridden_neuron_config or {}
     default_neuron_config.update(overridden_neuron_config)
-    return NeuronConfig(**default_neuron_config)
+    return default_neuron_config
 
 def get_neuron_model(model_config: ModelConfig,
                      parallel_config: ParallelConfig,
@@ -139,3 +158,4 @@ def get_neuron_model(model_config: ModelConfig,
     model.load_weights(model_config.model,
                        neuron_config=neuron_config,)
     return model.eval()
+
