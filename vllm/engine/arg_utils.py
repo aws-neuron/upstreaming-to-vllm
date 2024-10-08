@@ -789,11 +789,7 @@ class EngineArgs:
             "lower performance.")
         parser.add_argument(
             '--override-neuron-config',
-            type=lambda configs: {
-                str(key): value
-                for key, value in
-                (config.split(':') for config in configs.split(','))
-            },
+            type=json.loads,
             default=None,
             help="override or set neuron device configuration.")
 
