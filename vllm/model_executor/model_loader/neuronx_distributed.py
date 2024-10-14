@@ -36,7 +36,7 @@ _NEURON_SUPPORTED_MODELS: Dict[str, Tuple[str, str]] = {
                          "NeuronLlamaForCausalLM"),
     "DbrxForCausalLM": ("neuronx_distributed_inference.models.dbrx.modeling_dbrx",
                          "NeuronDbrxForCausalLM"),
-    "MixtralForCausalLM": ("neuronx_distributed_inference.models.modeling_mixtral",
+    "MixtralForCausalLM": ("neuronx_distributed_inference.models.mixtral.modeling_mixtral",
                          "NeuronMixtralForCausalLM"),
 }
 
