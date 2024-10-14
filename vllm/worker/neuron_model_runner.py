@@ -1,3 +1,4 @@
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
@@ -12,6 +13,7 @@ from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader.neuron import get_neuron_model
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
                              MultiModalInputs)
+from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
 from vllm.utils import is_pin_memory_available, make_tensor_with_pad
 from vllm.worker.model_runner_base import ModelRunnerBase, ModelRunnerInputBase
@@ -49,6 +51,9 @@ class ModelInputForNeuron(ModelRunnerInputBase):
 
 class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
 
+    # NEURON has an upper limit on the top_k
+    _MAX_NEURON_SAMPLING_TOP_K = 256
+
     def __init__(
         self,
         model_config: ModelConfig,
@@ -74,6 +79,38 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
 
         # Lazy initialization.
         self.model: nn.Module  # initialize after load_model.
+
+        # Once NEURON_ON_DEVICE_SAMPLING_DISABLED is set to a non-zero value,
+        # turn off on-device sampling.
+        self._on_device_sampling_disabled = int(
+            os.getenv("NEURON_ON_DEVICE_SAMPLING_DISABLED", "0"))
+
+        # NEURON needs to update sampling parameters when request IDs change
+        # across batches. This variable stores the previous batch's request IDs
+        # to determine if an update is needed.
+        self._previous_batch_request_ids: List[str] = []
+
+        if not self._on_device_sampling_disabled:
+            self._init_neuron_sampling()
+            
+    def _init_neuron_sampling(self) -> None:
+        from transformers_neuronx.config import GenerationConfig
+        logger.warning(
+                "On-device sampling is turned on in Neuron by default, only "
+                "top_k, top_p, and temperature are current supported sampling "
+                "parameters. To turn off the on-device sampling, please set "
+                "the environment variable NEURON_ON_DEVICE_SAMPLING_DISABLED=1."
+            )
+        self.model_config.neuron_sampling_params = GenerationConfig(
+            max_length=self.scheduler_config.max_model_len,
+            do_sample=True,
+            per_batch_line=True,
+            top_k=[self._MAX_NEURON_SAMPLING_TOP_K] \
+                * self.scheduler_config.max_num_seqs,
+            top_p=[1.0] * self.scheduler_config.max_num_seqs,
+            temperature=[1.0] * self.scheduler_config.max_num_seqs,
+            dynamic=True,
+            global_top_k=self._MAX_NEURON_SAMPLING_TOP_K)
 
     def load_model(self) -> None:
         self.model = get_neuron_model(
@@ -211,7 +248,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         else:
             (input_tokens, input_positions,
              input_block_ids) = self._prepare_decode(seq_group_metadata_list)
-            seq_lens = []
+            seq_lens = None
         sampling_metadata = SamplingMetadata.prepare(
             seq_group_metadata_list,
             seq_lens,
@@ -223,11 +260,59 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             self.pin_memory,
             generators=self.get_generators(finished_requests_ids))
 
+        if not self._on_device_sampling_disabled:
+            # Once the request IDs are changed in current iteration, we will
+            # update the on-device sampling parameters.
+            current_batch_request_ids = [
+                seq_group_meta_data.request_id
+                for seq_group_meta_data in seq_group_metadata_list
+            ]
+            if current_batch_request_ids != self._previous_batch_request_ids:
+                self._update_neuron_sampling_params(sampling_metadata)
+                self._previous_batch_request_ids = current_batch_request_ids
+
         return ModelInputForNeuron(input_tokens=input_tokens,
                                    input_positions=input_positions,
                                    input_block_ids=input_block_ids,
                                    sampling_metadata=sampling_metadata,
                                    multi_modal_kwargs=multi_modal_kwargs)
+
+    def _update_neuron_sampling_params(self,
+                                       sampling_metadata: SamplingMetadata):
+        # Update Neuron sampling parameters (GenerationConfig in Neuron)
+        current_sampling_params = self.model_config.neuron_sampling_params
+        assert current_sampling_params is not None, (
+            f"Failed to update sampling_params, "
+            f"current sampling params is {current_sampling_params}")
+
+        top_k = current_sampling_params.top_k
+        top_p = current_sampling_params.top_p
+        temperature = current_sampling_params.temperature
+        for index, seq_group_to_sample in enumerate(
+                sampling_metadata.seq_groups):
+            seq_group_top_k, seq_group_top_p, seq_group_temperature = \
+                self._convert_to_neuron_sampling_params(
+                    seq_group_to_sample.sampling_params)
+            top_k[index] = seq_group_top_k
+            top_p[index] = seq_group_top_p
+            temperature[index] = seq_group_temperature
+
+        self.model.model.update_generation_config(current_sampling_params)
+
+    def _convert_to_neuron_sampling_params(
+            self, sampling_params: SamplingParams) -> Tuple[int, float, float]:
+        # Returns the top_k, top_p and temperature parameters for neuron.
+        top_k = sampling_params.top_k
+        top_p = sampling_params.top_p
+        temperature = sampling_params.temperature
+
+        if temperature == 0.0:
+            # Enable greedy sampling on zero temperature
+            return (1, 1.0, 1.0)
+        if top_k < 0 or top_k > self._MAX_NEURON_SAMPLING_TOP_K:
+            top_k = self._MAX_NEURON_SAMPLING_TOP_K
+
+        return (top_k, top_p, temperature)
 
     @torch.inference_mode()
     def execute_model(
@@ -249,9 +334,13 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                                          device=self.device),
         )
 
-        # Compute the logits.
-        logits = self.model.compute_logits(hidden_states,
-                                           model_input.sampling_metadata)
+        # Compute the logits only if the on-device sampling is turned off as
+        # on-device sampling outputs the token ids.
+        if self._on_device_sampling_disabled:
+            logits = self.model.compute_logits(hidden_states,
+                                               model_input.sampling_metadata)
+        else:
+            logits = hidden_states
 
         # Sample the next token.
         output = self.model.sample(
