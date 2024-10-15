@@ -162,6 +162,7 @@ class EngineArgs:
     speculative_model_quantization: Optional[str] = None
     speculative_draft_tensor_parallel_size: Optional[int] = None
     num_speculative_tokens: Optional[int] = None
+    speculative_token_tree: Optional[str] = None
     speculative_max_model_len: Optional[int] = None
     speculative_disable_by_batch_size: Optional[int] = None
     ngram_prompt_lookup_max: Optional[int] = None
@@ -640,6 +641,12 @@ class EngineArgs:
             help='The number of speculative tokens to sample from '
             'the draft model in speculative decoding.')
         parser.add_argument(
+            '--speculative-token-tree',
+            type=nullable_str,
+            default=EngineArgs.speculative_token_tree,
+            help='The token tree definition used with speculation.'
+        )
+        parser.add_argument(
             '--speculative-draft-tensor-parallel-size',
             '-spec-draft-tp',
             type=int,
@@ -955,6 +962,7 @@ class EngineArgs:
             speculative_draft_tensor_parallel_size = \
                 self.speculative_draft_tensor_parallel_size,
             num_speculative_tokens=self.num_speculative_tokens,
+            speculative_token_tree=self.speculative_token_tree,
             speculative_disable_by_batch_size=self.
             speculative_disable_by_batch_size,
             speculative_max_model_len=self.speculative_max_model_len,
