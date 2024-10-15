@@ -18,8 +18,6 @@ class NeuronExecutor(ExecutorBase):
     def _init_executor(self) -> None:
         assert (self.lora_config is
                 None), "LoRA is not supported for Neuron backend."
-        assert (not self.speculative_config
-                ), "Speculative decoding not yet supported for Neuron backend."
 
         # Instantiate the worker and load the model to the device.
         self._init_worker()
@@ -34,6 +32,7 @@ class NeuronExecutor(ExecutorBase):
             scheduler_config=self.scheduler_config,
             device_config=self.device_config,
             cache_config=self.cache_config,
+            speculative_config=self.speculative_config,
             local_rank=0,
             rank=0,
             distributed_init_method=distributed_init_method)
@@ -59,8 +58,6 @@ class NeuronExecutor(ExecutorBase):
                 and not execute_model_req.blocks_to_swap_out
                 and not execute_model_req.blocks_to_copy), (
                     "Cache operations are not supported for Neuron backend.")
-        assert execute_model_req.num_lookahead_slots == 0, (
-            "lookahead not supported for Neuron backend.")
 
         output = self.driver_worker.execute_model(execute_model_req)
         return output
