@@ -2,4 +2,4 @@
 -r requirements-common.txt
 # Dependencies for Neuron devices
 torch-neuronx >= 2.1.2
-neuronx-cc
+neuronx-cc ~= 2.0
