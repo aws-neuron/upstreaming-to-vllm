@@ -92,7 +92,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
 
         if not self._on_device_sampling_disabled:
             self._init_neuron_sampling()
-            
+
     def _init_neuron_sampling(self) -> None:
         from transformers_neuronx.config import GenerationConfig
         logger.warning(
@@ -268,7 +268,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                 for seq_group_meta_data in seq_group_metadata_list
             ]
             if current_batch_request_ids != self._previous_batch_request_ids:
-                self._update_neuron_sampling_params(sampling_metadata)
+                self._update_neuron_sampling_params(seq_group_metadata_list)
                 self._previous_batch_request_ids = current_batch_request_ids
 
         return ModelInputForNeuron(input_tokens=input_tokens,
@@ -277,8 +277,8 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                                    sampling_metadata=sampling_metadata,
                                    multi_modal_kwargs=multi_modal_kwargs)
 
-    def _update_neuron_sampling_params(self,
-                                       sampling_metadata: SamplingMetadata):
+    def _update_neuron_sampling_params(
+        self, seq_group_metadata_list: List[SequenceGroupMetadata]):
         # Update Neuron sampling parameters (GenerationConfig in Neuron)
         current_sampling_params = self.model_config.neuron_sampling_params
         assert current_sampling_params is not None, (
@@ -288,14 +288,20 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         top_k = current_sampling_params.top_k
         top_p = current_sampling_params.top_p
         temperature = current_sampling_params.temperature
-        for index, seq_group_to_sample in enumerate(
-                sampling_metadata.seq_groups):
+
+        # The index of a sequence's sampling parameters in neuron is equal to 
+        # its index in `input_block_ids`.
+        for seq_group_metadata in seq_group_metadata_list:
+            seq_ids = list(seq_group_metadata.seq_data.keys())
+            sampling_params = seq_group_metadata.sampling_params
             seq_group_top_k, seq_group_top_p, seq_group_temperature = \
-                self._convert_to_neuron_sampling_params(
-                    seq_group_to_sample.sampling_params)
-            top_k[index] = seq_group_top_k
-            top_p[index] = seq_group_top_p
-            temperature[index] = seq_group_temperature
+                self._convert_to_neuron_sampling_params(sampling_params)
+
+            for seq_id in seq_ids:
+                index = seq_group_metadata.block_tables[seq_id][0]
+                top_k[index] = seq_group_top_k
+                top_p[index] = seq_group_top_p
+                temperature[index] = seq_group_temperature
 
         self.model.model.update_generation_config(current_sampling_params)
 
