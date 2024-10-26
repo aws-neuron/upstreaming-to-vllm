@@ -559,84 +559,32 @@ class Scheduler:
                 self._async_stopped.append(seq_group)
                 continue
 
-            # NOTE(woosuk): Preemption happens only when there is no available
-            # slot to keep all the sequence groups in the RUNNING state.
-            while not self._can_append_slots(seq_group):
-                budget.subtract_num_batched_tokens(seq_group.request_id,
-                                                   num_running_tokens)
-                num_running_seqs = seq_group.get_max_num_running_seqs()
-                budget.subtract_num_seqs(seq_group.request_id,
-                                         num_running_seqs)
+            self._append_slots(seq_group, blocks_to_copy)
+            is_prefill = seq_group.is_prefill()
 
-                if (curr_loras is not None and seq_group.lora_int_id > 0
-                        and seq_group.lora_int_id in curr_loras):
-                    curr_loras.remove(seq_group.lora_int_id)
-
-                # Determine victim sequence
-                cont_loop = True
-                if running_queue:
-                    # Preempt the lowest-priority sequence group.
-                    victim_seq_group = running_queue.pop()
-                else:
-                    # No other sequence group can be preempted.
-                    # Preempt the current sequence group.
-                    # Note: This is also where we stop this loop
-                    # (since there is nothing else to preempt)
-                    victim_seq_group = seq_group
-                    cont_loop = False
-
-                # With async postprocessor, before preempting a sequence
-                # we need to ensure it has no pending async postprocessor
-                do_preempt = True
-                if self.use_async_output_proc:
-                    assert self.output_proc_callback is not None
-                    self.output_proc_callback(
-                        request_id=victim_seq_group.request_id)
-
-                    # It may be that the async pending "victim_seq_group"
-                    # becomes finished, in which case we simply free it.
-                    if victim_seq_group.is_finished():
-                        self._free_finished_seq_group(victim_seq_group)
-                        do_preempt = False
-
-                # Do preemption
-                if do_preempt:
-                    preempted_mode = self._preempt(victim_seq_group,
-                                                   blocks_to_swap_out)
-                    if preempted_mode == PreemptionMode.RECOMPUTE:
-                        preempted.append(victim_seq_group)
-                    else:
-                        swapped_out.append(victim_seq_group)
-
-                if not cont_loop:
-                    break
+            scheduled_seq_group: ScheduledSequenceGroup = \
+                self._scheduled_seq_group_cache[self.cache_id].get_object()
+            scheduled_seq_group.seq_group = seq_group
+            if is_prefill:
+                scheduled_seq_group.token_chunk_size = num_running_tokens
+                prefill_seq_groups.append(scheduled_seq_group)
+                ret.prefill_seq_groups_list.append(seq_group)
             else:
-                self._append_slots(seq_group, blocks_to_copy)
-                is_prefill = seq_group.is_prefill()
+                scheduled_seq_group.token_chunk_size = 1
+                decode_seq_groups.append(scheduled_seq_group)
+                ret.decode_seq_groups_list.append(seq_group)
 
-                scheduled_seq_group: ScheduledSequenceGroup = \
-                    self._scheduled_seq_group_cache[self.cache_id].get_object()
-                scheduled_seq_group.seq_group = seq_group
-                if is_prefill:
-                    scheduled_seq_group.token_chunk_size = num_running_tokens
-                    prefill_seq_groups.append(scheduled_seq_group)
-                    ret.prefill_seq_groups_list.append(seq_group)
-                else:
-                    scheduled_seq_group.token_chunk_size = 1
-                    decode_seq_groups.append(scheduled_seq_group)
-                    ret.decode_seq_groups_list.append(seq_group)
-
-                budget.add_num_batched_tokens(seq_group.request_id,
-                                              num_running_tokens)
-                # OPTIMIZATION:  Note that get_max_num_running_seqs is
-                # expensive. For the default scheduling chase where
-                # enable_chunking is False, num_seqs are updated before running
-                # this method, so we don't have to update it again here.
-                if enable_chunking:
-                    num_running_seqs = seq_group.get_max_num_running_seqs()
-                    budget.add_num_seqs(seq_group.request_id, num_running_seqs)
-                if curr_loras is not None and seq_group.lora_int_id > 0:
-                    curr_loras.add(seq_group.lora_int_id)
+            budget.add_num_batched_tokens(seq_group.request_id,
+                                            num_running_tokens)
+            # OPTIMIZATION:  Note that get_max_num_running_seqs is
+            # expensive. For the default scheduling chase where
+            # enable_chunking is False, num_seqs are updated before running
+            # this method, so we don't have to update it again here.
+            if enable_chunking:
+                num_running_seqs = seq_group.get_max_num_running_seqs()
+                budget.add_num_seqs(seq_group.request_id, num_running_seqs)
+            if curr_loras is not None and seq_group.lora_int_id > 0:
+                curr_loras.add(seq_group.lora_int_id)
 
         self._scheduler_running_outputs_cache[self.next_cache_id].reset()
         self._scheduled_seq_group_cache[self.next_cache_id].reset()
