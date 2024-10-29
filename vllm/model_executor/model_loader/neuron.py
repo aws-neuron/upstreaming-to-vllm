@@ -142,6 +142,7 @@ class NeuronSpeculationCasualLM(nn.Module):
         # Organize input tensors by step instead of by sequence.
         accepted_token_ids_by_step = logits.transpose(0, 1)
         accepted_token_ids_by_step[accepted_token_ids_by_step==self.model.pad_token_id]=-1
+        accepted_token_ids_by_step = accepted_token_ids_by_step.tolist()
 
         sampler_output_list = []
         for step_index in range(num_steps):
@@ -154,23 +155,6 @@ class NeuronSpeculationCasualLM(nn.Module):
             sampler_output_list.append(
                 SamplerOutput(outputs=step_output_token_ids))
         return sampler_output_list
-
-
-def _is_pretrained_neuron_checkpoint(model_name_or_path: str) -> bool:
-    # Checking if the neuron checkpoint is saved in the old format.
-    if os.path.isdir(os.path.join(model_name_or_path, "pytorch_model.bin")):
-        return True
-    # Checking if the neuron checkpoint is saved in the new format.
-    pretrained_split_files = ["config.json", "generation_config.json"]
-    pretrained_split_format = ".safetensors"
-    for file in pretrained_split_files:
-        file_path = os.path.join(model_name_or_path, file)
-        if not os.path.isfile(file_path):
-            return False
-    for file in os.listdir(model_name_or_path):
-        if file.endswith(pretrained_split_format):
-            return True
-    return False
 
 
 def _get_model_architecture(config: PretrainedConfig) -> str:
