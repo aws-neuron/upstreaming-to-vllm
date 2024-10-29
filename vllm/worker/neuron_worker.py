@@ -64,8 +64,14 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
                     model_config, parallel_config, scheduler_config, device_config)
         elif neuron_framework == NeuronFramework.NEURONX_DISTRIBUTED_INFERENCE:
             from vllm.worker.neuronx_distributed_model_runner import NeuronxDistributedModelRunner
-            self.model_runner: NeuronxDistributedModelRunner = NeuronxDistributedModelRunner(
-                model_config, parallel_config, scheduler_config, device_config)
+            from vllm.worker.multi_step_neuronx_distributed_model_runner import MultiStepNeuronModelRunner
+            if self.speculative_config is not None:
+                self.model_runner = MultiStepNeuronModelRunner(
+                    model_config, parallel_config, scheduler_config,
+                    device_config, speculative_config)
+            else:
+                self.model_runner: NeuronxDistributedModelRunner = NeuronxDistributedModelRunner(
+                    model_config, parallel_config, scheduler_config, device_config)
         else:
             raise NotImplementedError(
                 f"Specified framework as {os.environ.get('VLLM_NEURON_FRAMEWORK')}," +
