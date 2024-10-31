@@ -83,7 +83,7 @@ def test_update_neuron_sampling_params_full_batch():
             block_tables={0: [1]},
         ),
         SequenceGroupMetadata(
-            request_id=f"test_0",
+            request_id=f"test_1",
             is_prompt=True,
             seq_data={1: SequenceData.from_seqs([4, 5, 6])},
             sampling_params=SamplingParams(temperature=0.2, top_k=2,
@@ -105,3 +105,47 @@ def test_update_neuron_sampling_params_full_batch():
     assert neuron_sampling_params.top_p == [0.2, 0.5]
     model_mock.model.update_generation_config.assert_called_once_with(
         neuron_sampling_params)
+
+def test_no_update_neuron_sampling_params_when_no_params_change():
+    os.environ["NEURON_ON_DEVICE_SAMPLING_DISABLED"] = "0"
+    model_runner = _create_neuron_model_runner(
+        "facebook/opt-125m",
+        seed=0,
+        dtype="float16",
+        max_num_seqs=1,
+    )
+    assert not model_runner._on_device_sampling_disabled
+
+    model_mock = MagicMock()
+    model_runner.model = model_mock
+
+    neuron_sampling_params = model_runner.model_config.neuron_sampling_params
+    neuron_sampling_params.temperature == [1.0]
+    neuron_sampling_params.top_k == [model_runner._MAX_NEURON_SAMPLING_TOP_K]
+    neuron_sampling_params.top_p == [1.0]
+
+    seq_group_metadata_list = [
+        SequenceGroupMetadata(
+            request_id=f"test_0",
+            is_prompt=True,
+            seq_data={0: SequenceData.from_seqs([1, 2, 3])},
+            sampling_params=SamplingParams(
+                temperature=1.0,
+                top_k=model_runner._MAX_NEURON_SAMPLING_TOP_K,
+                top_p=1.0,
+            ),
+            block_tables={0: [0]},
+        )
+    ]
+
+    model_runner.prepare_model_input(seq_group_metadata_list)
+
+    # No update_generation_config call should be made when there is no change on
+    # sampling parameters.
+    neuron_sampling_params = model_runner.model_config.neuron_sampling_params
+    assert neuron_sampling_params.temperature == [1.0]
+    assert neuron_sampling_params.top_k == [
+        model_runner._MAX_NEURON_SAMPLING_TOP_K
+    ]
+    assert neuron_sampling_params.top_p == [1.0]
+    model_mock.model.update_generation_config.assert_not_called()

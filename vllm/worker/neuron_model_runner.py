@@ -285,11 +285,13 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             f"Failed to update sampling_params, "
             f"current sampling params is {current_sampling_params}")
 
+        is_update_needed = False
+
         top_k = current_sampling_params.top_k
         top_p = current_sampling_params.top_p
         temperature = current_sampling_params.temperature
 
-        # The index of a sequence's sampling parameters in neuron is equal to 
+        # The index of a sequence's sampling parameters in neuron is equal to
         # its index in `input_block_ids`.
         for seq_group_metadata in seq_group_metadata_list:
             seq_ids = list(seq_group_metadata.seq_data.keys())
@@ -299,11 +301,19 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
 
             for seq_id in seq_ids:
                 index = seq_group_metadata.block_tables[seq_id][0]
+                if (
+                    top_k[index] != seq_group_top_k
+                    or top_p[index] != seq_group_top_p
+                    or temperature[index] != seq_group_temperature
+                ):
+                    is_update_needed = True
+
                 top_k[index] = seq_group_top_k
                 top_p[index] = seq_group_top_p
                 temperature[index] = seq_group_temperature
 
-        self.model.model.update_generation_config(current_sampling_params)
+        if is_update_needed:
+            self.model.model.update_generation_config(current_sampling_params)
 
     def _convert_to_neuron_sampling_params(
             self, sampling_params: SamplingParams) -> Tuple[int, float, float]:
