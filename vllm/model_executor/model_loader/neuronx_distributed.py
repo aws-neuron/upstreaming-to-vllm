@@ -146,7 +146,10 @@ class NeuronSpeculationCasualLM(nn.Module):
             return output.fused_outputs[1].view(1, -1)
         draft_new_tokens = output.fused_outputs[0].view(1, -1)
         target_tokens = output.fused_outputs[1].view(1, -1)
-        candidate_new_tokens = draft_new_tokens[:,:-1]
+        if self.config.neuron_config.enable_eagle_speculation:
+            candidate_new_tokens = draft_new_tokens[:, 1:]
+        else:
+            candidate_new_tokens = draft_new_tokens[:,:-1]
         selected_tokens = target_tokens[:,:-1]
         n_matches = ((~(candidate_new_tokens == selected_tokens)).cumsum(dim=-1) < 1).sum()
         accepted_tokens = target_tokens[:,:n_matches+1]
@@ -187,9 +190,13 @@ class NeuronSpeculationCasualLM(nn.Module):
         )
 
         draft_neuron_config = copy.deepcopy(config.neuron_config)
-        draft_neuron_config.speculation_length = 0
+        if not config.neuron_config.enable_eagle_speculation:
+            draft_neuron_config.speculation_length = 0
         draft_neuron_config.trace_tokengen_model = True
         draft_neuron_config.enable_fused_speculation = False
+        if config.neuron_config.enable_eagle_speculation:
+            draft_neuron_config.is_eagle_draft = True
+            draft_neuron_config.sequence_parallel_enabled = False
         draft_config = neuronx_model_cls.get_config_cls()(
             draft_neuron_config, load_config=load_pretrained_config(draft_model_name_or_path)
         )
@@ -277,6 +284,7 @@ def _get_default_neuron_speculation_config(model_config: ModelConfig,
         on_device_sampling_config= dict(top_k=1, do_sample=False,)
     )
     return neuron_config
+
 
 def _get_neuron_config_after_override(default_neuron_config,
                                       overridden_neuron_config):
