@@ -15,7 +15,7 @@ from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
                              MultiModalInputs)
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
-from vllm.utils import is_pin_memory_available, make_tensor_with_pad
+from vllm.utils import is_pin_memory_available, make_tensor_with_pad, is_transformers_neuronx, is_neuronx_distributed_inference
 from vllm.worker.model_runner_base import ModelRunnerBase, ModelRunnerInputBase
 
 if TYPE_CHECKING:
@@ -94,7 +94,10 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             self._init_neuron_sampling()
 
     def _init_neuron_sampling(self) -> None:
-        from transformers_neuronx.config import GenerationConfig
+        if is_transformers_neuronx():
+            from transformers_neuronx.config import GenerationConfig
+        else:
+            from transformers import GenerationConfig
         logger.warning(
                 "On-device sampling is turned on in Neuron by default, only "
                 "top_k, top_p, and temperature are current supported sampling "
@@ -312,7 +315,8 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                 top_p[index] = seq_group_top_p
                 temperature[index] = seq_group_temperature
 
-        if is_update_needed:
+        # update_generation_config is only available in transformers-neuronx
+        if is_update_needed and is_transformers_neuronx():
             self.model.model.update_generation_config(current_sampling_params)
 
     def _convert_to_neuron_sampling_params(
@@ -342,13 +346,30 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             raise ValueError(
                 "NeuronModelRunner does not support multi-step execution.")
 
-        hidden_states = self.model(
-            input_ids=model_input.input_tokens,
-            positions=model_input.input_positions,
-            input_block_ids=model_input.input_block_ids,
-            **MultiModalInputs.as_kwargs(model_input.multi_modal_kwargs or {},
-                                         device=self.device),
-        )
+        # extract top_k, top_p and temperature from model_input for neuron forward call
+        sampling_params = torch.tensor([[seq_group.sampling_params.top_k,
+                                       seq_group.sampling_params.top_p,
+                                       seq_group.sampling_params.temperature] for seq_group in model_input.sampling_metadata.seq_groups])
+
+        if is_neuronx_distributed_inference():
+            hidden_states = self.model(
+                input_ids=model_input.input_tokens,
+                positions=model_input.input_positions,
+                input_block_ids=model_input.input_block_ids,
+                sampling_params=sampling_params,
+                **MultiModalInputs.as_kwargs(model_input.multi_modal_kwargs or {},
+                                            device=self.device),
+            )            
+        elif is_transformers_neuronx():
+            # [TODO] validate on-device sampling
+            # The model signature may need change for on-device sampling
+            hidden_states = self.model(
+                input_ids=model_input.input_tokens,
+                positions=model_input.input_positions,
+                input_block_ids=model_input.input_block_ids,
+                **MultiModalInputs.as_kwargs(model_input.multi_modal_kwargs or {},
+                                            device=self.device),
+            )
 
         # Compute the logits only if the on-device sampling is turned off as
         # on-device sampling outputs the token ids.

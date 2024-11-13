@@ -64,12 +64,18 @@ class NeuronCasualLM(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         input_block_ids: torch.Tensor,
+        sampling_params: torch.Tensor,
     ) -> torch.Tensor:
         output = self.model(input_ids,
                             attention_mask=None,
                             position_ids=positions,
-                            seq_ids=input_block_ids)
-        return output.logits[:, -1, :]
+                            seq_ids=input_block_ids,
+                            sampling_params=sampling_params)
+        # on-device sampling
+        if self.config.neuron_config.on_device_sampling_config:
+            return output.hidden_states
+        else:
+            return output.logits[:, -1, :]
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
@@ -81,8 +87,22 @@ class NeuronCasualLM(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
+        # on-device sampling
+        if self.config.neuron_config.on_device_sampling_config:
+            batch_size = logits.shape
+            seq_ids = [seq_id for sg in sampling_metadata.seq_groups for seq_id in sg.seq_ids]
+            assert len(seq_ids) == list(batch_size)[0], "batch size mismatch"
+            # Organize input tensors by step instead of by sequence.
+            accepted_token_ids_by_step = logits.flatten()
+            accepted_token_ids_by_step = accepted_token_ids_by_step.tolist()
+
+            step_output_token_ids = []
+            for i, seq_id in enumerate(seq_ids):
+                token_id = accepted_token_ids_by_step[i]
+                step_output_token_ids.append(CompletionSequenceGroupOutput(samples=[SequenceOutput(parent_seq_id=seq_id, output_token=token_id, logprobs={token_id: Logprob(token_id)})], prompt_logprobs=None))
+            return SamplerOutput(outputs=step_output_token_ids)
+        else:
+            return self.sampler(logits, sampling_metadata)
 
     def load_weights(self, model_name_or_path: str, **kwargs):
         arch = _get_model_architecture(self.config)

@@ -17,8 +17,6 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
         scheduler_config: SchedulerConfig,
         device_config: DeviceConfig,
     ):
-        # Disable on-device sampling on NxDI as it is not supported yet.
-        os.environ["NEURON_ON_DEVICE_SAMPLING_DISABLED"] = "1"
         super().__init__(model_config, parallel_config, scheduler_config, device_config)
 
     def load_model(self) -> None:
