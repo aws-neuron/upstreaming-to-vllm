@@ -410,6 +410,7 @@ class ModelConfig:
         total_num_attention_heads = getattr(self.hf_text_config,
                                             "num_attention_heads", 0)
         tensor_parallel_size = parallel_config.tensor_parallel_size
+
         if total_num_attention_heads % tensor_parallel_size != 0:
             raise ValueError(
                 f"Total number of attention heads ({total_num_attention_heads})"
@@ -1662,7 +1663,6 @@ def _get_and_verify_dtype(
         else:
             # Casting between float16 and bfloat16 is allowed with a warning.
             logger.warning("Casting %s to %s.", config_dtype, torch_dtype)
-
     return torch_dtype
 
 

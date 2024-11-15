@@ -125,9 +125,13 @@ class NeuronCasualLM(nn.Module):
                 f"neuron-compiled-artifacts/{hashlib.md5(config.to_json_string().encode('utf-8')).hexdigest()}/")
         try:
             self.model = neuronx_model_cls(compiled_model_path)
+            override_neuron_config = kwargs["override_neuron_config"]
+            for k, v in override_neuron_config.items():
+                setattr(self.model.config.neuron_config, k, v)
             self.model.load(compiled_model_path)
             return
         except (FileNotFoundError, ValueError):
+            logger.warning(f"Exception: {e}")
             logger.warning(f"Failed to load the model from {compiled_model_path}, Recompiling...")
         if not os.path.exists(model_name_or_path):
             hf_model = AutoModelForCausalLM.from_pretrained(model_name_or_path)
@@ -223,7 +227,7 @@ class NeuronSpeculationCasualLM(nn.Module):
         fused_spec_config = FusedSpecNeuronConfig(neuronx_model_cls._model_cls, draft_config=draft_config, draft_model_path=draft_model_name_or_path)
         config.fused_spec_config = fused_spec_config
         self.config.neuron_config = neuron_config
-
+        
         if os.getenv("NEURON_COMPILED_ARTIFACTS") is not None:
             compiled_model_path = os.getenv("NEURON_COMPILED_ARTIFACTS")
         elif os.path.exists(model_name_or_path):
@@ -234,9 +238,13 @@ class NeuronSpeculationCasualLM(nn.Module):
                 f"neuron-compiled-artifacts/{hashlib.md5(config.to_json_string().encode('utf-8')).hexdigest()}/")
         try:
             self.model = neuronx_model_cls(compiled_model_path)
+            override_neuron_config = kwargs["override_neuron_config"]
+            for k, v in override_neuron_config.items():
+                setattr(self.model.config.neuron_config, k, v)
             self.model.load(compiled_model_path)
             return
-        except (FileNotFoundError, ValueError):
+        except (FileNotFoundError, ValueError) as e:
+            logger.warning(f"Exception: {e}")
             logger.warning(f"Failed to load the model from {compiled_model_path}, Recompiling...")
         if draft_model_name_or_path == model_name_or_path:
             draft_checkpoint_download = False
@@ -321,7 +329,8 @@ def get_neuron_model(model_config: ModelConfig,
     neuron_config = _get_neuron_config_after_override(default_neuron_config_args,
         model_config.override_neuron_config)
     model.load_weights(model_config.model,
-                       neuron_config=neuron_config,)
+                       neuron_config=neuron_config,
+                       override_neuron_config=model_config.override_neuron_config)
     return model.eval()
 
 def get_neuron_speculation_model(model_config: ModelConfig,
@@ -335,5 +344,6 @@ def get_neuron_speculation_model(model_config: ModelConfig,
         model_config.override_neuron_config)
     model.load_weights(model_config.model,
                        speculation_config.draft_model_config.model,
-                       neuron_config=neuron_config,)
+                       neuron_config=neuron_config, 
+                       override_neuron_config=model_config.override_neuron_config)
     return model.eval()
