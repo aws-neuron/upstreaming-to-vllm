@@ -271,7 +271,7 @@ class ModelConfig:
             "compressed-tensors", "experts_int8"
         ]
         tpu_supported_quantization = ["tpu_int8"]
-        neuron_supported_quantization = ["neuron_quant"]
+        neuron_supported_quantization = ["neuron_quant", "fbgemm_fp8"]
         if self.quantization is not None:
             self.quantization = self.quantization.lower()
 
