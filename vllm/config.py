@@ -407,15 +407,16 @@ class ModelConfig:
         self,
         parallel_config: "ParallelConfig",
     ) -> None:
-        total_num_attention_heads = getattr(self.hf_text_config,
-                                            "num_attention_heads", 0)
-        tensor_parallel_size = parallel_config.tensor_parallel_size
+        # Internal only: comment out as these are not relevant for NxDI
+        # total_num_attention_heads = getattr(self.hf_text_config,
+        #                                "num_attention_heads", 0)
+        # tensor_parallel_size = parallel_config.tensor_parallel_size
 
-        if total_num_attention_heads % tensor_parallel_size != 0:
-            raise ValueError(
-                f"Total number of attention heads ({total_num_attention_heads})"
-                " must be divisible by tensor parallel size "
-                f"({tensor_parallel_size}).")
+        # if total_num_attention_heads % tensor_parallel_size != 0:
+        #     raise ValueError(
+        #         f"Total number of attention heads ({total_num_attention_heads})"
+        #         " must be divisible by tensor parallel size "
+        #         f"({tensor_parallel_size}).")
 
         pipeline_parallel_size = parallel_config.pipeline_parallel_size
         architectures = getattr(self.hf_config, "architectures", [])
