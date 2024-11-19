@@ -160,11 +160,13 @@ class NeuronSpeculationCasualLM(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         input_block_ids: torch.Tensor,
+        sampling_params: torch.Tensor,
     ) -> torch.Tensor:
         output = self.model(input_ids,
                             attention_mask=None,
                             position_ids=positions,
-                            seq_ids=input_block_ids)
+                            seq_ids=input_block_ids,
+                            sampling_params=sampling_params)
         if output.fused_outputs[1].shape[-1] == 1:
             # CTX encoding
             return output.fused_outputs[1].view(1, -1)

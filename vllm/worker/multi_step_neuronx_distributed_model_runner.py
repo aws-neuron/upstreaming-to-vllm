@@ -6,6 +6,7 @@ from vllm.config import (DeviceConfig, ModelConfig, ParallelConfig,
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.multimodal import MultiModalInputs
 from vllm.sequence import IntermediateTensors
+from vllm.utils import is_neuronx_distributed_inference
 from vllm.worker.neuronx_distributed_model_runner import NeuronxDistributedModelRunner
 
 class MultiStepNeuronModelRunner(NeuronxDistributedModelRunner):
@@ -38,13 +39,29 @@ class MultiStepNeuronModelRunner(NeuronxDistributedModelRunner):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
     ) -> Optional[List[SamplerOutput]]:
-        logits = self.model(
-            input_ids=model_input.input_tokens,
-            positions=model_input.input_positions,
-            input_block_ids=model_input.input_block_ids,
-            **MultiModalInputs.as_kwargs(model_input.multi_modal_kwargs or {},
-                                        device=self.device),
-        )
+        if is_neuronx_distributed_inference():
+            sampling_params = torch.tensor([[
+                seq_group.sampling_params.top_k,
+                seq_group.sampling_params.top_p,
+                seq_group.sampling_params.temperature,
+            ] for seq_group in model_input.sampling_metadata.seq_groups])
+
+            logits = self.model(
+                input_ids=model_input.input_tokens,
+                positions=model_input.input_positions,
+                input_block_ids=model_input.input_block_ids,
+                sampling_params=sampling_params,
+                **MultiModalInputs.as_kwargs(model_input.multi_modal_kwargs or {},
+                                            device=self.device),
+            )
+        else:
+            logits = self.model(
+                input_ids=model_input.input_tokens,
+                positions=model_input.input_positions,
+                input_block_ids=model_input.input_block_ids,
+                **MultiModalInputs.as_kwargs(model_input.multi_modal_kwargs or {},
+                                            device=self.device),
+            )
 
         output = self.model.sample(
             logits=logits,
