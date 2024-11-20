@@ -130,7 +130,7 @@ class NeuronCasualLM(nn.Module):
                 setattr(self.model.config.neuron_config, k, v)
             self.model.load(compiled_model_path)
             return
-        except (FileNotFoundError, ValueError):
+        except (FileNotFoundError, ValueError) as e:
             logger.warning(f"Exception: {e}")
             logger.warning(f"Failed to load the model from {compiled_model_path}, Recompiling...")
         if not os.path.exists(model_name_or_path):
