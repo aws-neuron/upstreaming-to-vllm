@@ -252,6 +252,15 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             (input_tokens, input_positions,
              input_block_ids) = self._prepare_decode(seq_group_metadata_list)
             seq_lens = None
+        
+        if not self._on_device_sampling_disabled:
+            for seq_group_metadata in seq_group_metadata_list:
+                sampling_params = seq_group_metadata.sampling_params
+                top_k, top_p, temperature = self._convert_to_neuron_sampling_params(sampling_params)
+                sampling_params.top_k = top_k
+                sampling_params.top_p = top_p
+                sampling_params.temperature = temperature
+        
         sampling_metadata = SamplingMetadata.prepare(
             seq_group_metadata_list,
             seq_lens,
@@ -263,7 +272,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             self.pin_memory,
             generators=self.get_generators(finished_requests_ids))
 
-        if not self._on_device_sampling_disabled:
+        if is_transformers_neuronx() and not self._on_device_sampling_disabled:
             # Once the request IDs are changed in current iteration, we will
             # update the on-device sampling parameters.
             current_batch_request_ids = [
@@ -299,8 +308,10 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         for seq_group_metadata in seq_group_metadata_list:
             seq_ids = list(seq_group_metadata.seq_data.keys())
             sampling_params = seq_group_metadata.sampling_params
-            seq_group_top_k, seq_group_top_p, seq_group_temperature = \
-                self._convert_to_neuron_sampling_params(sampling_params)
+
+            seq_group_top_k = sampling_params.top_k
+            seq_group_top_p = sampling_params.top_p
+            seq_group_temperature = sampling_params.temperature
 
             for seq_id in seq_ids:
                 index = seq_group_metadata.block_tables[seq_id][0]
