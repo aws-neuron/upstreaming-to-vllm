@@ -6,8 +6,8 @@ from vllm.config import (DeviceConfig, ModelConfig, ParallelConfig,
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.multimodal import MultiModalInputs
 from vllm.sequence import IntermediateTensors
-from vllm.utils import is_neuronx_distributed_inference
 from vllm.worker.neuronx_distributed_model_runner import NeuronxDistributedModelRunner
+from vllm.worker.neuron_worker import use_neuronx_distributed
 
 class MultiStepNeuronModelRunner(NeuronxDistributedModelRunner):
 
@@ -39,7 +39,7 @@ class MultiStepNeuronModelRunner(NeuronxDistributedModelRunner):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
     ) -> Optional[List[SamplerOutput]]:
-        if is_neuronx_distributed_inference():
+        if use_neuronx_distributed():
             sampling_params = torch.tensor([[
                 seq_group.sampling_params.top_k,
                 seq_group.sampling_params.top_p,

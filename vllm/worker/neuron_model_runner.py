@@ -15,8 +15,9 @@ from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
                              MultiModalInputs)
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
-from vllm.utils import is_pin_memory_available, make_tensor_with_pad, is_transformers_neuronx, is_neuronx_distributed_inference
+from vllm.utils import is_pin_memory_available, make_tensor_with_pad
 from vllm.worker.model_runner_base import ModelRunnerBase, ModelRunnerInputBase
+from vllm.worker.neuron_worker import use_neuronx_distributed, use_transformers_neuronx
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
@@ -94,7 +95,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             self._init_neuron_sampling()
 
     def _init_neuron_sampling(self) -> None:
-        if is_transformers_neuronx():
+        if use_transformers_neuronx():
             from transformers_neuronx.config import GenerationConfig
         else:
             from transformers import GenerationConfig
@@ -272,7 +273,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             self.pin_memory,
             generators=self.get_generators(finished_requests_ids))
 
-        if is_transformers_neuronx() and not self._on_device_sampling_disabled:
+        if use_transformers_neuronx() and not self._on_device_sampling_disabled:
             # Once the request IDs are changed in current iteration, we will
             # update the on-device sampling parameters.
             current_batch_request_ids = [
@@ -327,7 +328,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                 temperature[index] = seq_group_temperature
 
         # update_generation_config is only available in transformers-neuronx
-        if is_update_needed and is_transformers_neuronx():
+        if is_update_needed and use_transformers_neuronx():
             self.model.model.update_generation_config(current_sampling_params)
 
     def _convert_to_neuron_sampling_params(
@@ -362,7 +363,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                                        seq_group.sampling_params.top_p,
                                        seq_group.sampling_params.temperature] for seq_group in model_input.sampling_metadata.seq_groups])
 
-        if is_neuronx_distributed_inference():
+        if use_neuronx_distributed():
             hidden_states = self.model(
                 input_ids=model_input.input_tokens,
                 positions=model_input.input_positions,
@@ -371,7 +372,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                 **MultiModalInputs.as_kwargs(model_input.multi_modal_kwargs or {},
                                             device=self.device),
             )            
-        elif is_transformers_neuronx():
+        elif use_transformers_neuronx():
             # [TODO] validate on-device sampling
             # The model signature may need change for on-device sampling
             hidden_states = self.model(

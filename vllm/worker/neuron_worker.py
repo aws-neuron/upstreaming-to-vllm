@@ -1,6 +1,7 @@
 """A Neuron worker class."""
 import enum
 import os
+from functools import lru_cache
 from typing import List, Optional, Tuple
 
 import torch
@@ -20,6 +21,51 @@ from vllm.utils import is_transformers_neuronx, is_neuronx_distributed_inference
 class NeuronFramework(enum.Enum):
     TRANSFORMERS_NEURONX = "transformers-neuronx"
     NEURONX_DISTRIBUTED_INFERENCE = "neuronx-distributed-inference"
+
+
+@lru_cache(maxsize=None)
+def get_neuron_framework_to_use():
+    """
+    Return the specified framework if the corresponding installations are available.
+    If no framework is specified, then use transformers-neuronx by default, if unavailable
+    then check and switch to neuronx-distributed-inference.
+    """
+    transformers_neuronx_installed = is_transformers_neuronx()
+    neuronx_distributed_inference_installed = is_neuronx_distributed_inference()
+    specified_framework = os.environ.get("VLLM_NEURON_FRAMEWORK")
+    if specified_framework == NeuronFramework.TRANSFORMERS_NEURONX.value and transformers_neuronx_installed:
+        return NeuronFramework.TRANSFORMERS_NEURONX
+    elif specified_framework == NeuronFramework.NEURONX_DISTRIBUTED_INFERENCE.value and neuronx_distributed_inference_installed:
+        return NeuronFramework.NEURONX_DISTRIBUTED_INFERENCE
+    elif specified_framework is None and transformers_neuronx_installed:
+        return NeuronFramework.TRANSFORMERS_NEURONX
+    elif specified_framework is None and neuronx_distributed_inference_installed:
+        return NeuronFramework.NEURONX_DISTRIBUTED_INFERENCE
+    else:
+        return None
+
+
+@lru_cache(maxsize=None)
+def use_neuronx_distributed():
+    """
+    Return True if the framework determined in get_neuron_framework_to_use() is
+    NeuronFramework.NEURONX_DISTRIBUTED_INFERENCE, False otherwise. This is used
+    to select the Neuron model framework and framework-specific configuration to apply
+    during model compilation.
+    """
+    return get_neuron_framework_to_use() == NeuronFramework.NEURONX_DISTRIBUTED_INFERENCE
+
+
+@lru_cache(maxsize=None)
+def use_transformers_neuronx():
+    """
+    Return True if the framework determined in get_neuron_framework_to_use() is
+    NeuronFramework.TRANSFORMERS_NEURONX, False otherwise. This is used to select
+    the Neuron model framework and framework-specific configuration to apply during
+    model compilation.
+    """
+    return get_neuron_framework_to_use() == NeuronFramework.TRANSFORMERS_NEURONX
+
 
 class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
     """A worker class that executes the model on a group of neuron cores.
@@ -50,7 +96,7 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils import init_cached_hf_modules
             init_cached_hf_modules()
-        neuron_framework = self._get_neuron_framework_to_use()
+        neuron_framework = get_neuron_framework_to_use()
 
         if neuron_framework == NeuronFramework.TRANSFORMERS_NEURONX:
             from vllm.worker.neuron_model_runner import NeuronModelRunner
@@ -77,26 +123,6 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
                 f"Specified framework as {os.environ.get('VLLM_NEURON_FRAMEWORK')}," +
                 " Only transformers-neuronx/neuronx-distributed-inference framework is supported")
         self.is_driver_worker = True
-
-    def _get_neuron_framework_to_use(self):
-        """
-        Return the specified framework if the corresponding installations are available.
-        If no framework is specified, then use transformers-neuronx by default, if unavailable
-        then check and switch to neuronx-distributed-inference.
-        """
-        transformers_neuronx_installed = is_transformers_neuronx()
-        neuronx_distributed_inference_installed = is_neuronx_distributed_inference()
-        specified_framework = os.environ.get("VLLM_NEURON_FRAMEWORK")
-        if specified_framework == NeuronFramework.TRANSFORMERS_NEURONX.value and transformers_neuronx_installed:
-            return NeuronFramework.TRANSFORMERS_NEURONX
-        elif specified_framework == NeuronFramework.NEURONX_DISTRIBUTED_INFERENCE.value and neuronx_distributed_inference_installed:
-            return NeuronFramework.NEURONX_DISTRIBUTED_INFERENCE
-        elif specified_framework is None and transformers_neuronx_installed:
-            return NeuronFramework.TRANSFORMERS_NEURONX
-        elif specified_framework is None and neuronx_distributed_inference_installed:
-            return NeuronFramework.NEURONX_DISTRIBUTED_INFERENCE
-        else:
-            return None
 
     def init_device(self) -> None:
         self.init_distributed_environment()
