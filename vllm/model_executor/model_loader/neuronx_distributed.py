@@ -2,6 +2,7 @@ import copy
 import importlib
 import hashlib
 import os
+import shutil
 from typing import Dict, List, Optional, Tuple
 
 import torch
@@ -120,9 +121,11 @@ class NeuronCasualLM(nn.Module):
         elif os.path.exists(model_name_or_path):
             compiled_model_path = os.path.join(model_name_or_path,
                 f"neuron-compiled-artifacts/{hashlib.md5(config.to_json_string().encode('utf-8')).hexdigest()}/")
+            shutil.rmtree(compiled_model_path, ignore_errors=True)
         else:
             compiled_model_path = os.path.join("local-models", model_name_or_path,
                 f"neuron-compiled-artifacts/{hashlib.md5(config.to_json_string().encode('utf-8')).hexdigest()}/")
+            shutil.rmtree(compiled_model_path, ignore_errors=True)
         try:
             self.model = neuronx_model_cls(compiled_model_path)
             override_neuron_config = kwargs["override_neuron_config"]
@@ -235,9 +238,11 @@ class NeuronSpeculationCasualLM(nn.Module):
         elif os.path.exists(model_name_or_path):
             compiled_model_path = os.path.join(model_name_or_path,
                 f"neuron-compiled-artifacts/{hashlib.md5(config.to_json_string().encode('utf-8')).hexdigest()}/")
+            shutil.rmtree(compiled_model_path, ignore_errors=True)
         else:
             compiled_model_path = os.path.join("local-models", model_name_or_path,
                 f"neuron-compiled-artifacts/{hashlib.md5(config.to_json_string().encode('utf-8')).hexdigest()}/")
+            shutil.rmtree(compiled_model_path, ignore_errors=True)
         try:
             self.model = neuronx_model_cls(compiled_model_path)
             override_neuron_config = kwargs["override_neuron_config"]
