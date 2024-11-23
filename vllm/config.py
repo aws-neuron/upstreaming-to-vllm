@@ -1111,7 +1111,6 @@ class SpeculativeConfig:
         speculative_model_quantization: Optional[str],
         speculative_draft_tensor_parallel_size: Optional[int],
         num_speculative_tokens: Optional[int],
-        speculative_token_tree: Optional[str],
         speculative_max_model_len: Optional[int],
         enable_chunked_prefill: bool,
         use_v2_block_manager: bool,
@@ -1146,8 +1145,6 @@ class SpeculativeConfig:
             num_speculative_tokens (Optional[int]): The number of speculative
                 tokens, if provided. Will default to the number in the draft
                 model config if present, otherwise is required.
-            speculative_token_tree (Optional[str]): The token tree structure
-                used with speculation.
             speculative_max_model_len (Optional[int]): The maximum model len of
                 the speculative model. Used when testing the ability to skip
                 speculation for some sequences.
@@ -1302,7 +1299,6 @@ class SpeculativeConfig:
             draft_model_config,
             draft_parallel_config,
             num_speculative_tokens,
-            speculative_token_tree,
             speculative_disable_by_batch_size,
             ngram_prompt_lookup_max,
             ngram_prompt_lookup_min,
@@ -1399,7 +1395,6 @@ class SpeculativeConfig:
         draft_model_config: ModelConfig,
         draft_parallel_config: ParallelConfig,
         num_speculative_tokens: int,
-        speculative_token_tree: Optional[str],
         speculative_disable_by_batch_size: Optional[int],
         ngram_prompt_lookup_max: Optional[int],
         ngram_prompt_lookup_min: Optional[int],
@@ -1416,8 +1411,6 @@ class SpeculativeConfig:
             draft_parallel_config: ParallelConfig for the draft model.
             num_speculative_tokens: The number of tokens to sample from the
                 draft model before scoring with the target model.
-            speculative_token_tree: The token tree structure used during
-                speculation.
             speculative_disable_by_batch_size: Disable speculative
                 decoding for new incoming requests when the number of
                 enqueue requests is larger than this value.
@@ -1448,7 +1441,6 @@ class SpeculativeConfig:
         self.draft_model_config = draft_model_config
         self.draft_parallel_config = draft_parallel_config
         self.num_speculative_tokens = num_speculative_tokens
-        self.speculative_token_tree = speculative_token_tree
         self.speculative_disable_by_batch_size = \
             speculative_disable_by_batch_size
         self.ngram_prompt_lookup_max = ngram_prompt_lookup_max or 0
