@@ -17,6 +17,7 @@ from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import (CompletionSequenceGroupOutput, Logprob,
                            SequenceOutput)
+from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 
 TORCH_DTYPE_TO_NEURON_AMP = {
     "auto": "f32",
@@ -125,6 +126,12 @@ class NeuronSpeculationCasualLM(nn.Module):
         super().__init__()
         self.model = speculation_model
 
+        # Speculation metrics
+        self.num_spec_tokens = speculation_model.k
+        self.accepted_tokens = 0
+        self.draft_tokens = 0
+        self.emitted_tokens = 0
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -139,7 +146,12 @@ class NeuronSpeculationCasualLM(nn.Module):
         batch_size, steps = tokens.shape
         mask = torch.arange(steps).expand(batch_size, -1) >= counts
         tokens[mask] = self.SPECULATION_TERMINATION_ID
-
+        min_values_per_row, _ = torch.min(positions, dim=-1)
+        do_context_decoding = (min_values_per_row == 0).any()
+        if not do_context_decoding:
+            self.accepted_tokens += counts.sum() - batch_size
+            self.draft_tokens += batch_size * self.num_spec_tokens
+            self.emitted_tokens += counts.sum()
         return tokens
 
     def sample(
@@ -164,6 +176,16 @@ class NeuronSpeculationCasualLM(nn.Module):
                 step_output_token_ids.append(CompletionSequenceGroupOutput(samples=[SequenceOutput(parent_seq_id=seq_ids[sequence_index], output_token=token_id, logprobs={token_id: Logprob(token_id)})], prompt_logprobs=None))
             sampler_output_list.append(
                 SamplerOutput(outputs=step_output_token_ids))
+        if self.draft_tokens != 0:
+            sampler_output_list[0].spec_decode_worker_metrics = (
+                SpecDecodeWorkerMetrics(
+                    num_spec_tokens=self.num_spec_tokens,
+                    draft_acceptance_rate=self.accepted_tokens/self.draft_tokens,
+                    system_efficiency=self.emitted_tokens/((self.draft_tokens//self.num_spec_tokens)*(self.num_spec_tokens + 1)),
+                    accepted_tokens=self.accepted_tokens,
+                    draft_tokens=self.draft_tokens,
+                    emitted_tokens=self.emitted_tokens)
+            )
         return sampler_output_list
 
 
