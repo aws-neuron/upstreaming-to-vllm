@@ -15,6 +15,7 @@ from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.logger import init_logger
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
+from vllm.worker.neuron_worker import use_neuronx_distributed
 
 logger = init_logger(__name__)
 
@@ -519,7 +520,8 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                 continue
             blocks.update(self.block_tables[seq.seq_id])
         # Cross-attention blocks
-        if seq_group.is_encoder_decoder():
+        # NXDI doesn't need to allocate additional blocks for cross attenion layers
+        if seq_group.is_encoder_decoder() and not use_neuronx_distributed():
             blocks.update(self.cross_block_tables[request_id])
         return list(blocks)
 

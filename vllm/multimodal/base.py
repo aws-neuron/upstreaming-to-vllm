@@ -8,9 +8,10 @@ import numpy as np
 import torch
 import torch.types
 from PIL import Image
+from PIL.Image import Image as PILImage
 from torch import nn
 from typing_extensions import TypeAlias
-
+from vllm.multimodal.neuron_multimodal_image_utils import compress_image_to_tensor
 from vllm.config import ModelConfig
 from vllm.inputs import InputContext
 from vllm.logger import init_logger
@@ -59,6 +60,9 @@ class MultiModalInputs(_MultiModalInputsBase):
 
         if isinstance(nested_tensors, (int, float)):
             return torch.tensor(nested_tensors)
+
+        if isinstance(nested_tensors, PILImage):
+            return compress_image_to_tensor(nested_tensors)
 
         stacked = [MultiModalInputs._try_stack(t) for t in nested_tensors]
         if not is_list_of(stacked, torch.Tensor, check="all"):
