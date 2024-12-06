@@ -5,19 +5,19 @@ from typing import List, Optional
 import torch
 from neuronx_distributed_inference.modules.generation.sampling import (
     prepare_sampling_params)
+from neuronx_distributed_inference.models.mllama.image_transform import (
+    custom_image_preprocessing)
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader.neuronx_distributed import (
     _get_model_architecture, get_neuron_model)
+from vllm.multimodal.neuron_multimodal_image_utils import decompress_image_from_tensor
 from vllm.sequence import IntermediateTensors
 from vllm.worker.neuron_model_runner import (ModelInputForNeuron,
                                              NeuronModelRunner)
 
-# FIXME(Neuron): need to restore multi-modal support
-# from vllm.multimodal.neuron_multimodal_image_utils import \
-#     decompress_image_from_tensor
 logger = init_logger(__name__)
 
 
@@ -62,8 +62,23 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
         return sampling_params
 
     def get_multi_modal_data_neuron(self, input_images):
-        # FIXME(Neuron): need to restore multi-modal support
-        raise NotImplementedError("need to restore multi-modal support")
+        total_image_size = 0
+        image_tensors = []
+        empty_pixel_values = torch.zeros([1, 1, 4, 3, 560, 560], dtype=torch.bfloat16)
+        empty_aspect_ratios = torch.ones([1, 1, 2], dtype=torch.int64)
+        num_chunks = torch.tensor([[1]]) # dummy num_chunks, will not be used
+        has_image = torch.tensor([0])
+        if (input_images is None) or (len(input_images) == 0) or (input_images.numel() == 0):
+            image_tensors = [empty_pixel_values, empty_aspect_ratios, num_chunks, has_image]
+        else:
+            image = decompress_image_from_tensor(input_images)
+            total_image_size += image.width * image.height
+            pixel_values, aspect_ratios, num_chunks = custom_image_preprocessing(self.model.config, [[image]])
+            has_image = torch.tensor([1])
+
+            image_tensors = [pixel_values.bfloat16().clone().detach(), aspect_ratios, num_chunks, has_image]
+
+        return image_tensors
 
     @torch.inference_mode()
     def execute_model(

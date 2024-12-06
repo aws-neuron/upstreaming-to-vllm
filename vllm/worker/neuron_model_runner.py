@@ -163,10 +163,10 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             assert len(block_table) == 1
             input_block_ids.append(block_table[0])
 
-            # mm_data = seq_group_metadata.multi_modal_data
-            # if mm_data:
-            #     # Process multi-modal data
-            #     multi_modal_inputs_list.append(mm_data)
+            mm_data = seq_group_metadata.multi_modal_data
+            if mm_data:
+                # Process multi-modal data
+                multi_modal_inputs_list.append(mm_data)
 
         max_seq_len = max(seq_lens)
         assert max_seq_len > 0
@@ -270,6 +270,14 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                 sampling_params.top_k = top_k
                 sampling_params.top_p = top_p
                 sampling_params.temperature = temperature
+
+        # we need multi_modal_data for later tokens as well
+        multi_modal_inputs_list: List[MultiModalInputs] = []
+        for seq_group_metadata in seq_group_metadata_list:
+            mm_data = seq_group_metadata.multi_modal_data
+            if mm_data:
+                multi_modal_inputs_list.append(mm_data)
+        multi_modal_kwargs = MultiModalInputs.batch(multi_modal_inputs_list)
 
         sampling_metadata = SamplingMetadata.prepare(
             seq_group_metadata_list,

@@ -178,6 +178,130 @@ class NeuronCausalLM(nn.Module):
         self.model.compile(compiled_model_path)
         self.model.load(compiled_model_path)
 
+class NeuronMllamaForCausalLM(nn.Module):
+
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        on_device_sampling_disabled: bool = False) -> None:
+        super().__init__()
+        self.config = config
+        self.logits_processor = LogitsProcessor(config.get_text_config().vocab_size,
+                                                logits_as_input=True)
+
+        self.on_device_sampling_disabled = on_device_sampling_disabled
+        if self.on_device_sampling_disabled:
+            # Use default sampler
+            self.sampler = Sampler()
+
+        # Lazy initialized
+        self.model: nn.Module
+
+    def forward(
+            self,
+            input_ids: torch.Tensor,
+            positions: torch.Tensor,
+            seq_ids: torch.Tensor,
+            pixel_values: torch.Tensor,
+            aspect_ratios: torch.Tensor,
+            num_chunks: torch.Tensor,
+            has_image: torch.Tensor,
+            sampling_params
+    ) -> torch.Tensor:
+        self.vision_mask = create_vision_mask(input_ids, self.vision_token_id)
+        output = self.model(input_ids.to(torch.int32),
+                            attention_mask=None,
+                            position_ids=positions.to(torch.int32),
+                            seq_ids= seq_ids.flatten().to(torch.int32),
+                            pixel_values=pixel_values.to(self.config.vision_config.torch_dtype),
+                            aspect_ratios=aspect_ratios.to(torch.int32),
+                            vision_mask=self.vision_mask.to(torch.int32),
+                            sampling_params=sampling_params,
+                            num_chunks=num_chunks.to(torch.int32),
+                            has_image=has_image.to(torch.int32),
+                            )
+        if self.config.neuron_config.on_device_sampling_config:
+            return output.hidden_states
+        return output.logits[:, -1, :]
+
+    def compute_logits(self, hidden_states: torch.Tensor,
+                    sampling_metadata: SamplingMetadata) -> torch.Tensor:
+        logits = self.logits_processor(None, hidden_states, sampling_metadata)
+        return logits
+
+    def sample(self, hidden_states, sampling_metadata):
+        if not self.on_device_sampling_disabled:
+            with torch.profiler.record_function("sample"):
+                hidden_states = hidden_states.flatten()
+                res = []
+                sample_idx = 0
+                for seq_group in sampling_metadata.seq_groups:
+                    seq_ids = seq_group.seq_ids
+                    samples = []
+                    for seq_id in seq_ids:
+                        token_id = hidden_states[sample_idx].item()
+                        samples.append(SequenceOutput(parent_seq_id=seq_id, output_token=token_id,
+                                                    logprobs={token_id: Logprob(token_id)}))
+                        sample_idx += 1
+                    res.append(CompletionSequenceGroupOutput(samples=samples, prompt_logprobs=None))
+                next_tokens = SamplerOutput(outputs=res)
+        else:
+            next_tokens = self.sampler(None, hidden_states, sampling_metadata)
+        return next_tokens
+
+    def load_weights(self, model_name_or_path: str, **kwargs):
+        arch = _get_model_architecture(self.config)
+        neuronx_module_path, neuronx_model_cls_name = (
+            _NEURON_SUPPORTED_MODELS[arch])
+        neuronx_module = importlib.import_module(neuronx_module_path)
+        neuronx_model_cls = getattr(neuronx_module, neuronx_model_cls_name)
+        neuron_config = neuronx_model_cls.get_neuron_config_cls()(**kwargs['neuron_config'])
+        self.config.neuron_config = neuron_config
+        print(f"neuron_config buckets: {self.config.neuron_config.buckets}")
+        config = neuronx_model_cls.get_config_cls()(
+            neuron_config, load_config=load_pretrained_config(model_name_or_path)
+        )
+        if os.getenv("NEURON_COMPILED_ARTIFACTS") is not None:
+            compiled_model_path = os.getenv("NEURON_COMPILED_ARTIFACTS")
+        elif os.path.exists(model_name_or_path):
+            compiled_model_path = os.path.join(model_name_or_path,
+                f"neuron-compiled-artifacts/{hashlib.md5(config.to_json_string().encode('utf-8')).hexdigest()}/")
+        else:
+            compiled_model_path = os.path.join("local-models", model_name_or_path,
+                f"neuron-compiled-artifacts/{hashlib.md5(config.to_json_string().encode('utf-8')).hexdigest()}/")
+        try:
+            self.model = neuronx_model_cls(compiled_model_path)
+            tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
+            self.vision_token_id = tokenizer("<|image|>", add_special_tokens=False).input_ids
+            self.model.load(compiled_model_path)
+            return
+        except (FileNotFoundError, ValueError):
+            logger.warning(f"Failed to load the model from {compiled_model_path}, Recompiling...")
+        if not os.path.exists(model_name_or_path):
+            hf_model = AutoModelForCausalLM.from_pretrained(model_name_or_path)
+            saved_path = os.path.join("local-models", model_name_or_path)
+            hf_model.save_pretrained(saved_path)
+            model_name_or_path = saved_path
+        self.model = neuronx_model_cls(model_name_or_path, config)
+
+        logger.info(f"\nCompiling and saving model to {model_name_or_path}...")
+        p = multiprocessing.Process(target=compile_model, args=(self, compiled_model_path))
+        p.start()
+        p.join()
+
+        tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
+        tokenizer.save_pretrained(compiled_model_path)
+        logger.info(f"successfully compiled and saved the model in {compiled_model_path}")
+
+        # Read "<|image|>" token_id from the tokenizer
+        self.vision_token_id = tokenizer("<|image|>", add_special_tokens=False).input_ids
+        logger.info("\nLoading model from compiled checkpoint...")
+        self.model.load(compiled_model_path)
+
+
+def compile_model(neuron_model, traced_model_path):
+    neuron_model.model.compile(traced_model_path)
+
 
 class NeuronMllamaForCausalLM(nn.Module):
 
@@ -471,7 +595,6 @@ class NeuronSpeculationCausalLM(nn.Module):
         self.model = neuronx_model_cls(model_name_or_path, config)
         self.model.compile(compiled_model_path)
         self.model.load(compiled_model_path)
-
 
 def _get_model_architecture(config: PretrainedConfig) -> str:
     architectures = getattr(config, "architectures", [])

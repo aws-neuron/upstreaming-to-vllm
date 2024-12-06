@@ -19,6 +19,7 @@ from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
                            SequenceGroupMetadata, SequenceGroupMetadataDelta,
                            SequenceStatus)
 from vllm.utils import Device, PyObjectCache
+from vllm.worker.neuron_worker import use_neuronx_distributed
 
 logger = init_logger(__name__)
 
@@ -1386,8 +1387,12 @@ class Scheduler:
                     # between engine and worker.
                     # the subsequent comms can still use delta, but
                     # `multi_modal_data` will be None.
+                    # However, we need `multi_modal_data` to always be present
+                    # for Neuron device
                     multi_modal_data=seq_group.multi_modal_data
-                    if scheduler_outputs.num_prefill_groups > 0 else None,
+                    if (scheduler_outputs.num_prefill_groups > 0
+                        or use_neuronx_distributed())
+                        else None,
                     multi_modal_placeholders=seq_group.multi_modal_placeholders
                     if scheduler_outputs.num_prefill_groups > 0 else None,
                     mm_processor_kwargs=seq_group.mm_processor_kwargs,
