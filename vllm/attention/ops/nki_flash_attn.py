@@ -84,7 +84,7 @@ def dropout_p_local(p_local, dropout_p, dropout_p_tensor, seed_tensor,
       softmax_dropout, 1 / (1 - dropout_p), mask=forward_mask)
 
 
-@nki.jit
+# @nki.jit
 def _flash_attention_core(q_local_tile, k, v,
                           q_h_per_k_h, seqlen_q, nheads,
                           o_buffer, l_buffer, m_buffer,
@@ -272,7 +272,7 @@ def _flash_attention_core(q_local_tile, k, v,
     l_buffer[:, 0] = nl.add(m_current, nl.log(l_exp, mask=forward_mask), mask=forward_mask)
 
 
-@nki.jit
+# @nki.jit
 def load_v_tile(v_hbm_tile, cur_v_tile, j, v_i, config):
   LARGE_TILE_SZ = config.seq_tile_size
   B_P_SIZE = 128
@@ -465,8 +465,8 @@ def flash_fwd(q, k, v, seed, logit_bias=None,
     if not inference:
       nl.store(lse[batch_id, head_id * q_h_per_k_h + i_q_h, :, :], l_buffer[:, :])
 
-  if config.training:
-    return o, lse
+  # if config.training:
+  #   return o, lse
 
   return o
 
