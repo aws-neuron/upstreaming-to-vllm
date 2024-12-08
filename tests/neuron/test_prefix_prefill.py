@@ -7,36 +7,43 @@ import torch
 import torch.nn.functional as F
 from typing import Optional
 
-# from transformers_neuronx import ContinuousBatchingConfig, NeuronConfig, Layout
-# from transformers_neuronx import hlo
-# from transformers_neuronx.layers import attention
-# from transformers_neuronx.layers import attention_utils
-# from transformers_neuronx_test.unit.validation import validate, verify
-
 
 class BlockDiagonalCausalFromBottomRightMask:
     @staticmethod
-    def from_seqlens(query_lens, seq_lens):
+    def _from_seqlens(query_lens, seq_lens, block_size=None):
         from torch import logical_and, logical_or, logical_not
 
+        contexted = block_size is None
+        context_lens = torch.tensor(seq_lens) - torch.tensor(query_lens)
         n_queries = sum(query_lens)
         n_keys = sum(seq_lens)
-        prior_mask = torch.zeros(n_queries, n_keys)
         num_seqs = len(query_lens)
+        if contexted:
+            key_lens_blockaligned = seq_lens
+        else:
+            # [3, 5, 4, 0] -(divide)-> [1, 2, 1, 0] -(multiply)-> [4, 8, 4, 0]
+            n_blocks_per_seq = (context_lens + block_size - 1) // block_size
+            offset_per_seq = torch.concat([torch.tensor([0]), n_blocks_per_seq]) * block_size
+            key_lens_blockaligned = offset_per_seq[:num_seqs].tolist()
 
         a = torch.arange(n_queries).reshape(n_queries, 1).expand(n_queries, n_keys)
         b = torch.arange(n_keys).reshape(1, n_keys).expand(n_queries, n_keys)
         q_cumsum = torch.tensor([0]+query_lens).cumsum(dim=0)
-        k_cumsum = torch.tensor([0]+seq_lens).cumsum(dim=0)
+        k_cumsum = torch.tensor([0]+key_lens_blockaligned).cumsum(dim=0)
 
+        prior_mask = torch.zeros(n_queries, n_keys)
         for seq_id in range(num_seqs):
             ri = q_cumsum[seq_id]
             ci = k_cumsum[seq_id]
             nr = query_lens[seq_id]
             nc = seq_lens[seq_id]
 
-            a_offset = ci + nc - ri - nr
-            new_mask = (a + a_offset) >= b
+            if contexted:
+                a_offset = ci+nc-ri-nr
+                new_mask = (a + a_offset) >= b
+            else:
+                a_offset = ci + nc - 1
+                new_mask = a_offset >= b
 
             left_mask = b >= ci
             top_mask = a >= ri
@@ -44,11 +51,18 @@ class BlockDiagonalCausalFromBottomRightMask:
 
             new_mask = logical_and(logical_and(logical_and(new_mask, left_mask), top_mask), bottom_mask)
             prior_mask = logical_or(prior_mask, new_mask)
-
-        # convert binary mask to -inf values
-        prior_mask = logical_not(prior_mask)
-        prior_mask = prior_mask.float()*-30000
         return prior_mask
+
+    @staticmethod
+    def from_seqlens(query_lens, seq_lens, block_size=None):
+        contexted = block_size is None
+        if contexted:
+            prior_mask = BlockDiagonalCausalFromBottomRightMask._from_seqlens(query_lens, seq_lens)
+            return prior_mask, None
+        else:
+            prior_mask = BlockDiagonalCausalFromBottomRightMask._from_seqlens(query_lens, seq_lens, block_size)
+            active_mask = BlockDiagonalCausalFromBottomRightMask._from_seqlens(query_lens, query_lens)
+            return prior_mask, active_mask
 
 
 def ref_masked_attention(
@@ -73,7 +87,12 @@ def ref_context_attention(query, key, value, query_lens, seq_lens, head_size, nu
         key = torch.repeat_interleave(key, num_queries_per_kv, dim=1)
         value = torch.repeat_interleave(value, num_queries_per_kv, dim=1)
 
-    attn_mask = BlockDiagonalCausalFromBottomRightMask.from_seqlens(query_lens, seq_lens)
+    attn_mask, _ = BlockDiagonalCausalFromBottomRightMask.from_seqlens(query_lens, seq_lens)
+
+    # convert binary mask to -inf values
+    attn_mask = torch.logical_not(attn_mask)
+    attn_mask = attn_mask.float()*-30000
+
     output = ref_masked_attention(query, key, value, scale, attn_mask)
 
     return output.unsqueeze(1)
@@ -94,12 +113,12 @@ def test_contexted_kv_attention(
     random.seed(0)
     torch.manual_seed(0)
 
-    max_ctx_len = 64
-    max_query_len = 64
+    max_ctx_len = 8 # 64
+    max_query_len = 8 # 64
     prefill_batch_size = 1
-    decode_batch_size = 7
+    decode_batch_size = 3
     batch_size = prefill_batch_size + decode_batch_size
-    block_size = 32
+    block_size = 4 # 32
     max_model_len = (max_query_len + max_ctx_len) * 4
     tp_degree = 2
 
@@ -233,7 +252,8 @@ def test_contexted_kv_attention(
 
     import torch_xla.core.xla_model as xm
     device = xm.xla_device()
-    attn_mask = BlockDiagonalCausalFromBottomRightMask.from_seqlens(query_lens, seq_lens)
+    prior_mask, active_mask = BlockDiagonalCausalFromBottomRightMask.from_seqlens(
+        query_lens, seq_lens, block_size=block_size)
     context_kv_len = num_active_blocks * block_size
     attn_mask = F.pad(attn_mask, (
         0, context_kv_len+B_P_SIZE-attn_mask.shape[1],
