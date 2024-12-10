@@ -166,6 +166,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             mm_data = seq_group_metadata.multi_modal_data
             if mm_data:
                 # Process multi-modal data
+                mm_data = self.process_multi_modal_data_neuron(mm_data)
                 multi_modal_inputs_list.append(mm_data)
 
         max_seq_len = max(seq_lens)
@@ -421,3 +422,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
     @property
     def vocab_size(self) -> int:
         return self.model_config.get_vocab_size()
+
+    def process_multi_modal_data_neuron(self, mm_data):
+        # this is a no-op for NeuronModelRunner
+        return mm_data
