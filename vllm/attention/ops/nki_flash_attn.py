@@ -16,19 +16,6 @@ from functools import reduce as functools_reduce
 from operator import mul as operator_mul
 
 
-def n_elts(shape):
-  return functools_reduce(operator_mul, shape, 1)
-
-
-def linearize(shape, indices):
-  return sum(i * (n_elts(shape[dim + 1:]))
-             for dim, i in enumerate(indices))
-
-
-def div_ceil(n, d):
-  return (n + d - 1) // d
-
-
 @dataclass(frozen=True)
 class FlashConfig:
   """
@@ -217,38 +204,14 @@ def _flash_attention_core(q_local_tile, k, v,
   for k_r_i in nl.affine_range(LARGE_TILE_SZ // REDUCTION_TILE):
     k_r_i_reduce_slice = nl.ds(k_r_i * REDUCTION_TILE, REDUCTION_TILE)
 
-    # dropout
-    if dropout_p > 0.0:
-      # compute exp(qk-max)
-      p_local[:, k_r_i_reduce_slice] = \
-        nisa.activation(np.exp, qk_res_buf[:, k_r_i_reduce_slice],
-                        bias=-1 * m_current, scale=1.0,
-                        dtype=kernel_dtype, mask=forward_mask)
-
-      seed_offset_base = k_r_i * (REDUCTION_TILE // B_F_SIZE) \
-                         + local_k_large_tile_idx * (LARGE_TILE_SZ // B_F_SIZE) \
-                         + q_tile_idx * seq_k_num_tiles \
-                         + (head_id * q_h_per_k_h + gqa_head_idx) * seq_k_num_tiles * seq_q_num_tiles \
-                         + batch_id * nheads * seq_k_num_tiles * seq_q_num_tiles
-
-      dropout_p_local(p_local=p_local, dropout_p=dropout_p,
-                      dropout_p_tensor=dropout_p_tensor, seed_tensor=seed_tensor,
-                      seed_offset_base=seed_offset_base, k_r_i=k_r_i,
-                      REDUCTION_TILE=REDUCTION_TILE, forward_mask=forward_mask)
-
-      # Compute partial row-tile sum of exp(qk-max))
-      # FIXME: Use activation accumulate and accumulate over k_r_i loop?
-      p_partial_sum[:, k_r_i] = nl.sum(p_local[:, k_r_i_reduce_slice],
-                                       axis=1, dtype=acc_type, mask=forward_mask)
-    else:
-      # compute exp(qk-max)
-      # Compute partial row-tile sum of exp(qk-max))
-      # FIXME: Use activation accumulate to accumulate over k_r_i loop?
-      p_local[:, k_r_i_reduce_slice] = \
-        nisa.activation_reduce(np.exp, qk_res_buf[:, k_r_i_reduce_slice],
-                               bias=-1 * m_current, scale=1.0,
-                               reduce_op=nl.add, reduce_res=p_partial_sum[:, k_r_i],
-                               dtype=kernel_dtype, mask=forward_mask)
+    # compute exp(qk-max)
+    # Compute partial row-tile sum of exp(qk-max))
+    # FIXME: Use activation accumulate to accumulate over k_r_i loop?
+    p_local[:, k_r_i_reduce_slice] = \
+      nisa.activation_reduce(np.exp, qk_res_buf[:, k_r_i_reduce_slice],
+                             bias=-1 * m_current, scale=1.0,
+                             reduce_op=nl.add, reduce_res=p_partial_sum[:, k_r_i],
+                             dtype=kernel_dtype, mask=forward_mask)
 
   ps = nl.sum(p_partial_sum, axis=1, dtype=acc_type, mask=forward_mask)
 
@@ -293,256 +256,6 @@ def load_v_tile(v_hbm_tile, cur_v_tile, j, v_i, config):
   cur_v_tile[v_i, :, :] = nl.load_transpose2d(
     v_hbm_tile[:, nl.ds(j * LARGE_TILE_SZ + B_P_SIZE * v_i, B_P_SIZE)],
     dtype=cur_v_tile.dtype)
-
-
-
-@nki.jit
-def flash_fwd(q, k, v, seed, logit_bias=None,
-              softmax_scale=None,
-              use_causal_mask=True,
-              mixed_precision=True,
-              dropout_p=0.0, config=None):
-  """
-  Flash Attention Forward kernel
-
-  IO tensor layouts:
-    - q: shape   (bs, n_heads, d, seq_q)
-    - k: shape   (bs, nk_heads, d, seq_k)
-    - v: shape   (bs, nv_heads, d, seq_v) if config.should_transpose_v  else (bs, nv_heads, seq_v, d)
-    - seed: shape (1,)
-    - logit_bias: shape (bs, n_heads, seq_q, seq_k)
-    - o: shape (bs, n_heads, seq_q, d)
-    - lse: shape (bs, n_heads, nl.tile_size.pmax, seq // nl.tile_size.pmax) if training else None
-    - This kernel requires seq_k == seq_v
-
-  IO tensor dtypes:
-    - This kernel assumes all IO tensors have the same dtype
-    - If mixed_percision is True, then all Tensor Engine operation will be performed in
-      bfloat16 and accumulation will be performed in float32. Otherwise the intermediates
-      will be in the same type as the inputs.
-
-  Compile-time Constants:
-    - softmax_scale: scaling for softmax, is None, default is `1.0/(d**0.5)`
-    - mixed_precision: flag to set non-matmul ops in fp32 precision, defualt is set to `true`, if false, we use same precision as input types
-    - causal_mask: flag to set causal masking
-    - config: Instance of dataclass :class:`nki.kernels.attention.FlashConfig` with Performance config parameters for flash attention with default values
-        seq_tile_size: `default=2048`, size of the kv tile size for attention computation reduction
-        training: bool to indicate training vs inference `default=True`
-
-  Performance Notes:
-    For better performance, the kernel is tiled to be of size `LARGE_TILE_SZ`, and Flash attention math techniques are applied in unit
-    of `LARGE_TILE_SZ`. Seqlen that is not divisible by `LARGE_TILE_SZ` is not supported at the moment.
-
-  GQA support Notes:
-    the spmd kernel for launching kernel should be on kv_heads instead of nheads
-
-  Example usage:
-    MHA: q: [b, h, d, s], k: [b, h, d, s], v: [b, h, s, d]
-      usage: `flash_fwd[b, h](q, k, v, ...)`
-    GQA: q: [b, h, d, s], k: [b, kv_h, d, s], v: [b, kv_h, s, d]
-      usage: `flash_fwd[b, kv_h](q, k, v, ...)`
-  """
-  config = config or FlashConfig()
-  B_F_SIZE=512
-  B_P_SIZE=128
-  b, h, d, seqlen_q  = q.shape
-  B_D_SIZE = d
-  _, k_h, _, seqlen_k = k.shape
-  if config.should_transpose_v:
-    assert tuple(v.shape) == (b, k_h, d, seqlen_k), f"Expect shape of V to be {(b, k_h, d, seqlen_k)} (batch, heads, d_head, seqlen_k) but got {v.shape}"
-    assert tuple(k.shape) == (b, k_h, d, seqlen_k), f"Expect shape of K to be {(b, k_h, d, seqlen_k)} (batch, heads, d_head, seqlen_k) but got {k.shape}"
-  else:
-    assert tuple(v.shape) == (b, k_h, seqlen_k, d), f"Expect shape of V to be {(b, k_h, seqlen_k, d)} (batch, heads, seqlen_k, d_head) but got {v.shape}"
-    assert tuple(k.shape) == (b, k_h, d, seqlen_k), f"Expect shape of K to be {(b, k_h, d, seqlen_k)} (batch, heads, d_head, seqlen_k) but got {k.shape}"
-  assert d <= 128, f" we do not support head_dim > 128, got head dim {d}"
-  kernel_dtype = nl.bfloat16 if mixed_precision else q.dtype
-  acc_type = np.dtype(np.float32) if mixed_precision else kernel_dtype
-
-  o = nl.ndarray((b, h, seqlen_q, d), dtype=q.dtype, buffer=nl.shared_hbm)
-  if config.training:
-    lse = nl.ndarray((b, h, nl.tile_size.pmax, seqlen_q // nl.tile_size.pmax),
-                     dtype=acc_type, buffer=nl.shared_hbm)
-  else:
-    lse = None
-
-  assert nl.program_ndim() == 2,\
-    f'Expect spmd grid with 2 dimensions, got {nl.program_ndim()} instead!'
-  batch_id = nl.program_id(axis=0)
-  head_id = nl.program_id(axis=1)
-
-  softmax_scale = softmax_scale or (1.0 / (d ** 0.5))
-
-  n_tile_q = seqlen_q // B_P_SIZE # since q will be loaded on tensor engine
-
-  LARGE_TILE_SZ = config.seq_tile_size
-  # FIXME: Add masking for different seqlen values.
-  assert config.seq_tile_size >= 512, f" seq tile_size {config.seq_tile_size} cannot be less than 512"
-  assert seqlen_k % LARGE_TILE_SZ == 0, f"Need seqlen_k to be divisible by {LARGE_TILE_SZ} but got {seqlen_k}"
-  num_large_k_tile = seqlen_k // LARGE_TILE_SZ
-
-  # inference flag, check if lse is none
-  inference = not config.training
-  if inference:
-    assert lse is None, "lse should be none for inference"
-    assert seed is None, f"seed should be None for inference, but got {seed}"
-    assert dropout_p==0.0, f"dropout should be 0.0 for inference but got {dropout_p}"
-  else:
-    assert lse is not None, "lse should not be none for training"
-  q_h_per_k_h = h // k_h
-
-  if dropout_p > 0.0 and not inference:
-    seed_local = nl.load(seed[0])
-    # TODO: Remove this once the dropout supports scale prob
-    dropout_p_tensor = nl.full((B_P_SIZE, 1), fill_value=dropout_p, dtype=np.float32)
-  else:
-    dropout_p_tensor = None
-    seed_local = None
-
-  if logit_bias is not None:
-    b_logit_bias, h_logit_bias, _, _ = logit_bias.shape
-    assert b_logit_bias == 1 and h_logit_bias == 1, "only support broadcasting logit_bias with batch 1, n_heads 1"
-
-  for i_q_h in nl.affine_range(q_h_per_k_h):
-
-    # =============== Global Flash Attention accumulators ====================== #
-    o_buffer = nl.zeros((n_tile_q, par_dim(B_P_SIZE), d), dtype=acc_type,
-                        buffer=nl.sbuf, lazy_initialization=True)
-    l_buffer = nl.zeros((par_dim(B_P_SIZE), n_tile_q), dtype=acc_type,
-                        buffer=nl.sbuf, lazy_initialization=True)
-    m_buffer = nl.zeros((n_tile_q, par_dim(B_P_SIZE), 1), dtype=acc_type,
-                        buffer=nl.sbuf, lazy_initialization=True)
-    # =============== Global Flash Attention accumulators END ================== #
-
-
-    for j in nl.sequential_range(0, num_large_k_tile):
-      cur_k_tile = nl.ndarray((par_dim(B_D_SIZE), LARGE_TILE_SZ), dtype=kernel_dtype)
-      cur_v_tile = nl.ndarray((LARGE_TILE_SZ // B_P_SIZE, par_dim(B_P_SIZE), B_D_SIZE), dtype=kernel_dtype)
-
-      cur_k_tile[:, :] = nl.load(k[batch_id, head_id, :, nl.ds(j*LARGE_TILE_SZ, LARGE_TILE_SZ)])
-
-      load_tile_size = B_P_SIZE
-
-      v_hbm_tile = v[batch_id, head_id]
-      for v_i in nl.affine_range(LARGE_TILE_SZ // load_tile_size):
-        load_v_tile(v_hbm_tile=v_hbm_tile, cur_v_tile=cur_v_tile, j=j, v_i=v_i,
-                    config=config)
-
-      for i in nl.affine_range(n_tile_q):
-        q_tile = nl.ndarray((B_D_SIZE, B_P_SIZE),dtype=kernel_dtype)
-        q_hbm_tile = q[batch_id, head_id * q_h_per_k_h + i_q_h]
-        q_sbuf_tile = nl.load(q_hbm_tile[:, nl.ds(i * B_P_SIZE, B_P_SIZE)],
-                              dtype=kernel_dtype) # load (d, 128) tile in SBUF
-        q_tile[:, :] = q_sbuf_tile * softmax_scale
-
-        logit_bias_tile = None
-        if logit_bias is not None:
-          logit_bias_tile = nl.ndarray((par_dim(B_P_SIZE), LARGE_TILE_SZ), dtype=kernel_dtype)
-          logit_bias_tile[:, :] = nl.load(
-            logit_bias[0, 0, nl.ds(i * B_P_SIZE, B_P_SIZE),
-                       nl.ds(j * LARGE_TILE_SZ, LARGE_TILE_SZ)])
-
-        _flash_attention_core(q_local_tile=q_tile, k=cur_k_tile, v=cur_v_tile,
-                              q_h_per_k_h=q_h_per_k_h, seqlen_q=seqlen_q, nheads=h,
-                              o_buffer=o_buffer[i], l_buffer=l_buffer[:, i], m_buffer=m_buffer[i],
-                              batch_id=batch_id, head_id=head_id,
-                              gqa_head_idx=i_q_h, q_tile_idx=i, local_k_large_tile_idx=j,
-                              kernel_dtype=kernel_dtype, acc_type=acc_type,
-                              flash_config=config, use_causal_mask=use_causal_mask,
-                              initialize=j == 0,
-                              B_P_SIZE=B_P_SIZE, B_F_SIZE=B_F_SIZE, B_D_SIZE=B_D_SIZE,
-                              dropout_p=dropout_p, dropout_p_tensor=dropout_p_tensor,
-                              seed_tensor=seed_local, logit_bias_tile=logit_bias_tile)
-
-    # -------- write output to buffer on HBM ------------ #
-    for i in nl.affine_range(n_tile_q):
-      out = nl.multiply(o_buffer[i, :, :],
-                        nl.exp(m_buffer[i, :, :] - l_buffer[:, i]),
-                        dtype=kernel_dtype)
-
-      nl.store(o[batch_id, head_id * q_h_per_k_h + i_q_h,
-                 nl.ds(i*B_P_SIZE, B_P_SIZE), :], out)
-
-    if not inference:
-      nl.store(lse[batch_id, head_id * q_h_per_k_h + i_q_h, :, :], l_buffer[:, :])
-
-  # if config.training:
-  #   return o, lse
-
-  return o
-
-
-@nki.jit
-def load_dy_q(dy_ref_hbm_tile, q_ref_hbm_tile, dy_local, q_local, d_head_n_tiles, d_head_tile_size, i_q_seq_tile,
-              q_seq_tile_size, softmax_scale):
-  for i_d_head_tile in nl.affine_range(d_head_n_tiles):
-    i_d_head_dslice = nl.ds(i_d_head_tile * d_head_tile_size, d_head_tile_size)
-    i_q_seq_dslice = nl.ds(i_q_seq_tile * q_seq_tile_size, q_seq_tile_size)
-
-    dy_local[i_d_head_tile, :, :] = nl.load(
-      dy_ref_hbm_tile[i_d_head_dslice, i_q_seq_dslice],
-      dtype=dy_local.dtype)
-
-    q_local[i_d_head_tile, :, :] = nl.load(
-      q_ref_hbm_tile[i_d_head_dslice, i_q_seq_dslice],
-      dtype=q_local.dtype) * softmax_scale
-
-
-@nki.jit
-def store_dk_dv(out_dk_ref_hbm_tile, out_dv_ref_hbm_tile, local_dk, local_dv,
-                d_head_n_tiles, d_head_tile_size, i_k_seq_dslice):
-  for i in nl.affine_range(d_head_n_tiles):
-    i_d_head_dslice = nl.ds(i * d_head_tile_size, d_head_tile_size)
-
-    nl.store(out_dv_ref_hbm_tile[i_d_head_dslice, i_k_seq_dslice],
-             value=local_dv[i, :, :])
-
-    nl.store(out_dk_ref_hbm_tile[i_d_head_dslice, i_k_seq_dslice],
-             value=local_dk[i, :, :])
-
-
-@nki.jit
-def load_kv(k_ref_hbm_tile, v_ref_hbm_tile, k_local, transposed_k_local, v_local,
-            d_head_n_tiles, d_head_tile_size, i_k_seq_tile, k_seq_tile_size,
-            k_seq_tile_size_backward):
-  k_seq_fwd_bwd_tile_multipler = k_seq_tile_size // k_seq_tile_size_backward
-
-  for i in nl.affine_range(d_head_n_tiles):
-    i_d_head_dslice = nl.ds(i * d_head_tile_size, d_head_tile_size)
-    i_k_seq_dslice = nl.ds(i_k_seq_tile * k_seq_tile_size, k_seq_tile_size)
-    k_local[i, :, :] = nl.load(k_ref_hbm_tile[i_d_head_dslice, i_k_seq_dslice],
-                                           dtype=k_local.dtype)
-    v_local[i, :, :] = nl.load(v_ref_hbm_tile[i_d_head_dslice, i_k_seq_dslice],
-                                           dtype=v_local.dtype)
-    ##############################################################
-    # Prefetch k transpose for the backward too
-    ##############################################################
-    for j in nl.affine_range(k_seq_fwd_bwd_tile_multipler):
-      i_k_dslice = nl.ds(j * k_seq_tile_size_backward, k_seq_tile_size_backward)
-      transposed_k_local[j, i, :, :] = nisa.nc_transpose(k_local[i, :, i_k_dslice])
-
-
-@nki.jit
-def compute_rowsum(dy_o_sum, dy_ref_hbm_tile, o_ref_hbm_tile, d_head_n_tiles, d_head_tile_size, q_seq_n_tiles,
-                   q_seq_tile_size):
-  mixed_dtype = dy_o_sum.dtype
-  for i in nl.affine_range(q_seq_n_tiles):
-    dy_o_partial = nl.zeros((par_dim(q_seq_tile_size), d_head_n_tiles), dtype=mixed_dtype)
-    for j in nl.affine_range(d_head_n_tiles):
-      d_head_dslice = nl.ds(j * d_head_tile_size, d_head_tile_size)
-      q_seq_dslice = nl.ds(i * q_seq_tile_size, q_seq_tile_size)
-
-      dy_local = nl.load_transpose2d(dy_ref_hbm_tile[d_head_dslice, q_seq_dslice],
-                                     dtype=mixed_dtype)
-      o_local = nl.load_transpose2d(o_ref_hbm_tile[d_head_dslice, q_seq_dslice],
-                                    dtype=mixed_dtype)
-
-      dy_o = nl.multiply(dy_local, o_local, dtype=mixed_dtype)
-      dy_o_partial[:, j] = nisa.tensor_reduce(np.add, data=dy_o, axis=(1,),
-                                              dtype=mixed_dtype)
-
-    dy_o_sum[i, :, 0] = nisa.tensor_reduce(
-      np.add, data=dy_o_partial[:, :], axis=(1,), dtype=mixed_dtype)
-
 
 
 @nki.jit
@@ -633,7 +346,7 @@ def flash_paged_attention(query, key, value,
   num_blocks_per_large_tile = LARGE_TILE_SZ // block_size
 
   # inference flag
-  # assert (not config.training), "flash_paged_attention supports inference only."
+  assert (not config.training), "flash_paged_attention supports inference only."
 
   block_tables_sbuf = nl.full((par_dim(B_P_SIZE), num_large_k_tile), 0, dtype=np.int32, buffer=nl.sbuf)
   for j in nl.affine_range(num_large_k_tile):
@@ -748,23 +461,3 @@ def flash_paged_attention(query, key, value,
   if return_softmax_max_sum:
     return o, l_m
   return o
-
-
-def flash_attn_with_kvcache(
-    q,
-    k_cache,
-    v_cache,
-    softmax_scale,
-    causal,
-    block_table,
-    cache_seqlens,
-    softcap,
-    window_size,
-):
-  from torch_neuronx import nki_jit
-
-  # Decorate the NKI kernel for PyTorch tracing
-  nki_tensor_add_kernel_torch = nki_jit(flash_paged_attention)
-  nki_tensor_add_kernel_torch[grid_x, grid_y](a_input, b_input, c_output)
-  return c_output
-  pass

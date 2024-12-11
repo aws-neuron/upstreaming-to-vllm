@@ -108,26 +108,31 @@ def test_contexted_kv_attention(
     head_size: int,
 ) -> None:
     import os
-    os.environ["NEURON_CC_FLAGS"]= " -O1 --internal-hlo2tensorizer-options='--verify-hlo' --retry_failed_compilation "
+    os.environ["NEURON_CC_FLAGS"]= " --model-type=transformer -O1 --internal-hlo2tensorizer-options='--verify-hlo' --retry_failed_compilation "
 
     random.seed(0)
     torch.manual_seed(0)
+    torch.set_printoptions(sci_mode=False)
 
-    max_ctx_len = 8 # 64
-    max_query_len = 8 # 64
-    prefill_batch_size = 1
-    decode_batch_size = 3
+    min_ctx_len = 1
+    max_ctx_len = 4
+    min_query_len = 1
+    max_query_len = 4
+    prefill_batch_size = 2
+    decode_batch_size = 6
     batch_size = prefill_batch_size + decode_batch_size
-    block_size = 4 # 32
+    block_size = 32
     max_model_len = (max_query_len + max_ctx_len) * 4
     tp_degree = 2
 
     max_block_per_request = max_model_len // block_size
     dtype = torch.float32
     cache_size = (batch_size * max_block_per_request) + 2
-    ctx_lens = [random.randint(2, max_ctx_len) for _ in range(prefill_batch_size)] + \
-        [random.randint(2, max_ctx_len) for _ in range(decode_batch_size)]
-    query_lens = [random.randint(2, max_query_len) for _ in range(prefill_batch_size)] + \
+    # ctx_lens = [random.randint(min_ctx_len, max_ctx_len) for _ in range(prefill_batch_size)] + \
+    #     [random.randint(min_ctx_len, max_ctx_len) for _ in range(decode_batch_size)]
+    ctx_lens = [0 for _ in range(prefill_batch_size)] + \
+        [random.randint(min_ctx_len, max_ctx_len) for _ in range(decode_batch_size)]
+    query_lens = [random.randint(min_query_len, max_query_len) for _ in range(prefill_batch_size)] + \
         [1 for _ in range(decode_batch_size)]
     seq_lens = [a + b for a, b in zip(query_lens, ctx_lens)]
     num_kv_heads = num_heads // num_queries_per_kv
@@ -193,31 +198,30 @@ def test_contexted_kv_attention(
                                        num_kv_heads, num_heads, num_queries_per_kv)
 
     # build neuron program
+    B_P_SIZE = 128
+    LARGE_TILE_SZ = 512
     max_num_seqs = batch_size
     n_blocks = (max_model_len * max_num_seqs) // block_size
     max_num_queries = ((sum(query_lens) + block_size - 1) // block_size) * block_size
     max_num_keys = n_blocks * block_size
 
+    @torch.compile(backend="openxla")
     def context_attention_fwd(query, key, value, key_cache, value_cache, block_table, attn_mask):
         import numpy as np
         import neuronxcc.nki as nki
-        from vllm.attention.ops.nki_flash_attn import flash_paged_attention
+        from vllm.attention.ops.nki_flash_attn import flash_paged_attention, FlashConfig
 
-        # grid_x = a_input.shape[0] // 128
-        # grid_y = a_input.shape[1] // 512
-        # c_output = np.zeros(a_input.shape, dtype=a_input.dtype)
-        # nki_tensor_add_kernel_baremetal = nki.baremetal(nki_tensor_add_kernel_)
-        # nki_tensor_add_kernel_baremetal[grid_x, grid_y](a_input, b_input, c_output)
+        config = FlashConfig(seq_tile_size=LARGE_TILE_SZ, training=False, should_transpose_v=False)
 
-        o = flash_paged_attention[1, 1](
+        o, debug_tensors = flash_paged_attention[1, 1](
             query, key, value, key_cache, value_cache,
             block_table, attn_mask,
-            softmax_scale=None, config=None,
+            softmax_scale=None, config=config,
             mixed_precision=True,
-            return_softmax_max_sum=False
+            return_softmax_max_sum=True
         )
 
-        return o
+        return o, debug_tensors
 
     def get_active_block_tables(block_tables, query_lens, seq_lens, block_size, num_blocks):
         context_lens = seq_lens - query_lens
@@ -231,11 +235,16 @@ def test_contexted_kv_attention(
     def shift_bit_length(x):
         return 1<<(x-1).bit_length()
 
-    B_P_SIZE = 128
-    max_num_queries_padded = shift_bit_length(max_num_queries) * 2
+    max_num_queries_shifted = shift_bit_length(max_num_queries)
+    max_num_queries_factor = B_P_SIZE // max_num_queries_shifted
+    max_num_queries_padded = max_num_queries_shifted * max_num_queries_factor
+    assert max_num_queries_padded == B_P_SIZE, "invalid {max_num_queries_padded=}"
     head_size_padded = B_P_SIZE
     context_lens = torch.tensor(seq_lens) - torch.tensor(query_lens)
-    num_active_blocks = shift_bit_length(((context_lens + block_size - 1) // block_size).sum().item()) * 4
+    num_active_blocks_shifted = shift_bit_length(((context_lens + block_size - 1) // block_size).sum().item())
+    num_active_blocks_factor = LARGE_TILE_SZ // block_size // num_active_blocks_shifted
+    num_active_blocks = num_active_blocks_shifted * num_active_blocks_factor
+    assert (num_active_blocks*block_size) == LARGE_TILE_SZ, "invalid {num_active_blocks=}"
     pad_dims = (
         0, head_size_padded-query.shape[2],
         0, 0,
@@ -255,10 +264,17 @@ def test_contexted_kv_attention(
     prior_mask, active_mask = BlockDiagonalCausalFromBottomRightMask.from_seqlens(
         query_lens, seq_lens, block_size=block_size)
     context_kv_len = num_active_blocks * block_size
-    attn_mask = F.pad(attn_mask, (
-        0, context_kv_len+B_P_SIZE-attn_mask.shape[1],
-        0, B_P_SIZE-attn_mask.shape[0]
-    ), "constant", 0).bool()
+    assert context_kv_len == LARGE_TILE_SZ, f"invalid {context_kv_len=}"
+    attn_mask = torch.concat([
+        F.pad(prior_mask, (
+            0, context_kv_len-prior_mask.shape[1],
+            0, B_P_SIZE-prior_mask.shape[0]
+        ), "constant", 0).bool(),
+        F.pad(active_mask, (
+            0, B_P_SIZE-active_mask.shape[1],
+            0, B_P_SIZE-active_mask.shape[0]
+        ), "constant", 0).bool()
+    ], dim=1)
 
     example = (
         # query: shape (1, n_heads, d, seq_q)
@@ -280,8 +296,8 @@ def test_contexted_kv_attention(
         # torch.tensor(seq_lens).to(device=device),
         attn_mask.to(device=device),
     )
-    output_nki = context_attention_fwd(*example)
+    output_nki, debug_tensors = context_attention_fwd(*example)
     # - o: shape (bs, n_heads, seq_q, d) -> (bs, seq_q, n_heads, d)
     output_nki = output_nki.permute(0, 2, 1, 3)[:,:,:,:head_size].cpu()
-    output_ref_padded = output_ref_padded.transpose(0, 1)
-    torch.testing.assert_close(output_nki, output_ref_padded, atol=1e-2, rtol=0)
+    output_ref = output_ref_padded.transpose(0, 1)
+    torch.testing.assert_close(output_nki, output_ref, atol=1e-2, rtol=0)
