@@ -232,11 +232,11 @@ def test_contexted_kv_attention(
             kwargs.update(value_cache=value_cache.cpu().numpy())
             kwargs.update(block_tables=block_table.cpu().numpy())
             kwargs.update(mask=attn_mask.cpu().numpy())
-            o, debug_tensors = nki.simulate_kernel(flash_paged_attention[1, 1], **kwargs)
+            o, *debug_tensors = nki.simulate_kernel(flash_paged_attention[1, 1], **kwargs)
         else:
-            o, debug_tensors = flash_paged_attention[1, n_kv_head](**kwargs, mixed_precision=False)
+            o, *debug_tensors = flash_paged_attention[1, n_kv_head](**kwargs, mixed_precision=False)
 
-        return o, debug_tensors
+        return o, *debug_tensors
 
     def get_active_block_tables(block_tables, query_lens, seq_lens, block_size, num_blocks):
         context_lens = seq_lens - query_lens
@@ -312,10 +312,10 @@ def test_contexted_kv_attention(
         attn_mask.to(device=device),
     )
 
-    output_nki, debug_tensors = context_attention_fwd(*example, simulate=simulate)
+    output_nki, *debug_tensors = context_attention_fwd(*example, simulate=simulate)
     if simulate:
         output_nki = torch.tensor(output_nki)
-        debug_tensors = torch.tensor(debug_tensors)
+        debug_tensors = [torch.tensor(dt) for dt in debug_tensors]
     # - o: shape (bs, n_heads, seq_q, d) -> (bs, seq_q, n_heads, d)
     output_nki = output_nki.permute(0, 2, 1, 3)[:,:,:,:head_size].cpu()
     output_ref = output_ref_padded.transpose(0, 1)

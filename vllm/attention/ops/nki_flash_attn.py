@@ -322,9 +322,9 @@ def flash_paged_attention(query, key, value,
   acc_type = np.dtype(np.float32) if mixed_precision else kernel_dtype
 
   o = nl.ndarray((b, h, seqlen_q, d), dtype=query.dtype, buffer=nl.shared_hbm)
-  l_m = None
-  if return_softmax_max_sum:
-    l_m = nl.ndarray((b, h, seqlen_q, 2), dtype=acc_type, buffer=nl.shared_hbm)
+  # l_m = None
+  # if return_softmax_max_sum:
+  #   l_m = nl.ndarray((b, h, seqlen_q, 2), dtype=acc_type, buffer=nl.shared_hbm)
 
   assert nl.program_ndim() == 2,\
     f'Expect spmd grid with 2 dimensions, got {nl.program_ndim()} instead!'
@@ -405,6 +405,12 @@ def flash_paged_attention(query, key, value,
                               seed_tensor=None, logit_bias_tile=None)
 
   # compute attention between input query, key and value
+  l_m, hbm_q_tile, hbm_k_tile, hbm_v_tile = None, None, None, None
+  if return_softmax_max_sum:
+    l_m = nl.ndarray((b, h, seqlen_q, 2), dtype=acc_type, buffer=nl.shared_hbm)
+    hbm_q_tile = nl.ndarray((1, seqlen_q, B_D_SIZE), dtype=acc_type, buffer=nl.shared_hbm)
+    hbm_k_tile = nl.ndarray((seqlen_q, B_D_SIZE), dtype=acc_type, buffer=nl.shared_hbm)
+    hbm_v_tile = nl.ndarray((1, seqlen_q, B_D_SIZE), dtype=acc_type, buffer=nl.shared_hbm)
   if key is not None and value is not None:
     B_F_SIZE = seqlen_q
     LARGE_TILE_SZ = seqlen_q
@@ -443,7 +449,6 @@ def flash_paged_attention(query, key, value,
                               dropout_p=0.0, dropout_p_tensor=None,
                               seed_tensor=None, logit_bias_tile=None)
 
-
   # -------- write output to buffer on HBM ------------ #
   for i_q_h in nl.affine_range(q_h_per_k_h):
     for i in nl.affine_range(n_tile_q):
@@ -457,7 +462,9 @@ def flash_paged_attention(query, key, value,
       if return_softmax_max_sum:
         nl.store(l_m[batch_id, head_id * q_h_per_k_h + i_q_h, nl.ds(i*B_P_SIZE, B_P_SIZE), 0], m_buffer[i, i_q_h, :, :])
         nl.store(l_m[batch_id, head_id * q_h_per_k_h + i_q_h, nl.ds(i*B_P_SIZE, B_P_SIZE), 1], l_buffer[:, i, i_q_h])
+        nl.store(hbm_k_tile[:, :], cur_k_tile[:, :])
+        nl.store(hbm_v_tile[i, :, :], cur_v_tile[i, :, :])
 
   if return_softmax_max_sum:
-    return o, l_m
+    return o, l_m, hbm_k_tile, hbm_v_tile
   return o
