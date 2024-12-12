@@ -32,16 +32,18 @@ class BlockDiagonalCausalFromBottomRightMask:
         k_cumsum = torch.tensor([0]+key_lens_blockaligned).cumsum(dim=0)
 
         prior_mask = torch.zeros(n_queries, n_keys)
+        new_masks = []
         for seq_id in range(num_seqs):
             ri = q_cumsum[seq_id]
             ci = k_cumsum[seq_id]
             nr = query_lens[seq_id]
-            nc = seq_lens[seq_id]
 
             if contexted:
+                nc = seq_lens[seq_id]
                 a_offset = ci+nc-ri-nr
                 new_mask = (a + a_offset) >= b
             else:
+                nc = context_lens[seq_id]
                 a_offset = ci + nc - 1
                 new_mask = a_offset >= b
 
@@ -51,6 +53,7 @@ class BlockDiagonalCausalFromBottomRightMask:
 
             new_mask = logical_and(logical_and(logical_and(new_mask, left_mask), top_mask), bottom_mask)
             prior_mask = logical_or(prior_mask, new_mask)
+            new_masks = new_masks + [new_mask]
         return prior_mask
 
     @staticmethod
@@ -58,11 +61,11 @@ class BlockDiagonalCausalFromBottomRightMask:
         contexted = block_size is None
         if contexted:
             prior_mask = BlockDiagonalCausalFromBottomRightMask._from_seqlens(query_lens, seq_lens)
-            return prior_mask, None
+            active_mask = None
         else:
             prior_mask = BlockDiagonalCausalFromBottomRightMask._from_seqlens(query_lens, seq_lens, block_size)
             active_mask = BlockDiagonalCausalFromBottomRightMask._from_seqlens(query_lens, query_lens)
-            return prior_mask, active_mask
+        return prior_mask, active_mask
 
 
 def ref_masked_attention(
@@ -198,6 +201,7 @@ def test_contexted_kv_attention(
                                        num_kv_heads, num_heads, num_queries_per_kv)
 
     # build neuron program
+    simulate = True
     B_P_SIZE = 128
     LARGE_TILE_SZ = 512
     max_num_seqs = batch_size
@@ -205,21 +209,32 @@ def test_contexted_kv_attention(
     max_num_queries = ((sum(query_lens) + block_size - 1) // block_size) * block_size
     max_num_keys = n_blocks * block_size
 
-    @torch.compile(backend="openxla")
-    def context_attention_fwd(query, key, value, key_cache, value_cache, block_table, attn_mask):
+    def context_attention_fwd(query, key, value, key_cache, value_cache, block_table, attn_mask, simulate=False):
         import numpy as np
         import neuronxcc.nki as nki
         from vllm.attention.ops.nki_flash_attn import flash_paged_attention, FlashConfig
 
         config = FlashConfig(seq_tile_size=LARGE_TILE_SZ, training=False, should_transpose_v=False)
-
-        o, debug_tensors = flash_paged_attention[1, 1](
-            query, key, value, key_cache, value_cache,
-            block_table, attn_mask,
+        kwargs = dict(
+            query=query, key=key, value=value, key_cache=key_cache, value_cache=value_cache,
+            block_tables=block_table, mask=attn_mask,
             softmax_scale=None, config=config,
             mixed_precision=True,
             return_softmax_max_sum=True
         )
+        _, n_kv_head, _, _ = key.shape
+
+        if simulate:
+            kwargs.update(query=query.cpu().numpy())
+            kwargs.update(key=key.cpu().numpy())
+            kwargs.update(value=value.cpu().numpy())
+            kwargs.update(key_cache=key_cache.cpu().numpy())
+            kwargs.update(value_cache=value_cache.cpu().numpy())
+            kwargs.update(block_tables=block_table.cpu().numpy())
+            kwargs.update(mask=attn_mask.cpu().numpy())
+            o, debug_tensors = nki.simulate_kernel(flash_paged_attention[1, 1], **kwargs)
+        else:
+            o, debug_tensors = flash_paged_attention[1, n_kv_head](**kwargs, mixed_precision=False)
 
         return o, debug_tensors
 
@@ -282,7 +297,7 @@ def test_contexted_kv_attention(
         # value: shape (1, n_kv_heads, d, seq_v) if config.should_transpose_v else (1, n_kv_heads, seq_v, d)
         query.unsqueeze(1).transpose(0,1).permute(0, 2, 3, 1).contiguous().to(device=device),
         k.unsqueeze(1).transpose(0,1).permute(0, 2, 3, 1).contiguous().to(device=device),
-        v.unsqueeze(1).transpose(0,1).permute(0, 2, 3, 1).contiguous().to(device=device),
+        v.unsqueeze(1).transpose(0,1).permute(0, 2, 1, 3).contiguous().to(device=device),
         # transpose K_cache[num_blocks, block_size, num_kv_heads, head_size]
         # to K_cache[num_blocks, num_kv_heads, head_size, block_size]
         # k_cache.permute(0, 2, 3, 1).contiguous().to(device=device),
@@ -296,8 +311,16 @@ def test_contexted_kv_attention(
         # torch.tensor(seq_lens).to(device=device),
         attn_mask.to(device=device),
     )
-    output_nki, debug_tensors = context_attention_fwd(*example)
+
+    output_nki, debug_tensors = context_attention_fwd(*example, simulate=simulate)
+    if simulate:
+        output_nki = torch.tensor(output_nki)
+        debug_tensors = torch.tensor(debug_tensors)
     # - o: shape (bs, n_heads, seq_q, d) -> (bs, seq_q, n_heads, d)
     output_nki = output_nki.permute(0, 2, 1, 3)[:,:,:,:head_size].cpu()
     output_ref = output_ref_padded.transpose(0, 1)
+    print(f"{output_nki[0,:20,0,:2]}")
+    print(f"{output_ref[0,:20,0,:2]}")
+    print(f"{attn_mask[:20,:16].int()}")
+    print(f"{attn_mask[:20,-128:-110].int()}")
     torch.testing.assert_close(output_nki, output_ref, atol=1e-2, rtol=0)
