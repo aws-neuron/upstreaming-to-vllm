@@ -288,6 +288,9 @@ class BlockSpaceManagerV1(BlockSpaceManager):
 
         check_no_caching_or_swa_for_blockmgr_encdec(self, seq_group)
 
+        # NXDI doesn't need to allocate additional blocks for cross attenion layers
+        if use_neuronx_distributed():
+            seq_group.encoder_seq = None
         self_num_required_blocks = self._get_seq_num_required_blocks(
             seq_group.get_seqs(status=SequenceStatus.WAITING)[0])
         cross_num_required_blocks = self._get_seq_num_required_blocks(
@@ -519,9 +522,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             if seq.is_finished():
                 continue
             blocks.update(self.block_tables[seq.seq_id])
-        # Cross-attention blocks
-        # NXDI doesn't need to allocate additional blocks for cross attenion layers
-        if seq_group.is_encoder_decoder() and not use_neuronx_distributed():
+        if seq_group.is_encoder_decoder():
             blocks.update(self.cross_block_tables[request_id])
         return list(blocks)
 

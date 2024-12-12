@@ -3,3 +3,4 @@
 
 torch-neuronx >= 2.1.2 # Enable PyTorch on Neuron devices.
 neuronx-cc ~= 2.0
+torchvision # Required for Llama3.2 multimodal image preprocessing
