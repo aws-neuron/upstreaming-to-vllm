@@ -1,10 +1,16 @@
 import torch
+import requests
 from PIL import Image
 
 from vllm import LLM, SamplingParams
 from vllm import TextPrompt
 
-from neuronx_distributed_inference.models.mllama.utils import get_image, add_instruct
+from neuronx_distributed_inference.models.mllama.utils import add_instruct
+
+def get_image(image_url):
+    image = Image.open(requests.get(image_url, stream=True).raw)
+    return image
+
 
 # Configurations
 MODEL_PATH = "/home/ubuntu/model_hf/Llama-3.2-90B-Vision-Instruct-hf"
@@ -20,27 +26,21 @@ ON_DEVICE_SAMPLING_CONFIG = {"global_topk":64, "dynamic": True, "deterministic":
 # Model Inputs
 PROMPTS = ["What is in this image? Tell me a story",
             "What is the recipe of mayonnaise in two sentences?" ,
-            "How many people are in this image?",
-            "What is the capital of Italy famous for?"]
-
-# Example images can be found in `Vllm/examples/nxdi_mm_data/`
-IMAGES = [get_image("nxdi_mm_data/dog.jpg"),
-            torch.empty((0,0)),
-            get_image("nxdi_mm_data/people.jpg"),
-            torch.empty((0,0)),
+            "Describe this image",
+            "What is the capital of Italy famous for?",
             ]
+IMAGES = [get_image("https://github.com/meta-llama/llama-models/blob/main/models/scripts/resources/dog.jpg?raw=true"),
+          torch.empty((0,0)),
+          get_image("https://awsdocs-neuron.readthedocs-hosted.com/en/latest/_images/nxd-inference-block-diagram.jpg"),
+          torch.empty((0,0)),
+          ]
 SAMPLING_PARAMS = [
     dict(top_k=1, temperature=1.0, top_p=1.0, max_tokens=256),
     dict(top_k=1, temperature=0.9, top_p=1.0, max_tokens=256),
     dict(top_k=10, temperature=0.9, top_p=0.5, max_tokens=512),
-    dict(top_k=10, temperature=0.75, top_p=0.5, max_tokens=1024)
-]
+    dict(top_k=10, temperature=0.75, top_p=0.5, max_tokens=1024),
+    ]
 
-
-def get_image(image_path):
-    with open(image_path, "rb") as f:
-        img = Image.open(f).convert("RGB")
-        return img
 
 def get_VLLM_mllama_model_inputs(prompt, single_image, sampling_params):
     # Prepare all inputs for mllama generation, including:
@@ -68,7 +68,7 @@ def print_outputs(outputs):
 
 
 if __name__ == '__main__':
-    assert len(PROMPTS) == len(IMAGES) and len(PROMPTS) == len(SAMPLING_PARAMS), \
+    assert len(PROMPTS) == len(IMAGES) == len(SAMPLING_PARAMS), \
         f"""Text, image prompts and sampling parameters should have the same batch size, 
             got {len(PROMPTS)}, {len(IMAGES)}, and {len(SAMPLING_PARAMS)}"""
 
