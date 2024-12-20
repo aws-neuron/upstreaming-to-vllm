@@ -84,16 +84,28 @@ class NeuronCausalLM(nn.Module):
         input_block_ids: torch.Tensor,
         sampling_params: torch.Tensor,
     ) -> torch.Tensor:
+        # sort block ids sequentially for perf/neuron support reasons
+        sorted_input_block_ids = torch.argsort(input_block_ids)
+        input_ids = torch.index_select(input_ids, 0, sorted_input_block_ids)
+        positions = torch.index_select(positions, 0, sorted_input_block_ids)
+        sampling_params = torch.index_select(sampling_params, 0, sorted_input_block_ids)
+        sorted_input_block_ids = torch.index_select(input_block_ids, 0, sorted_input_block_ids)
+    
         output = self.model(input_ids,
                             attention_mask=None,
                             position_ids=positions,
-                            seq_ids=input_block_ids,
+                            seq_ids=sorted_input_block_ids,
                             sampling_params=sampling_params)
         # on-device sampling
         if self.config.neuron_config.on_device_sampling_config:
-            return output.hidden_states
+            output = output.hidden_states
         else:
-            return output.logits[:, -1, :]
+            output = output.logits[:, -1, :]
+
+        if input_block_ids.shape[0] != 1:
+            output = torch.index_select(output, 0, input_block_ids)
+
+        return output
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
@@ -337,14 +349,24 @@ class NeuronSpeculationCausalLM(nn.Module):
         input_block_ids: torch.Tensor,
         sampling_params: torch.Tensor,
     ) -> torch.Tensor:
+        # sort block ids sequentially for perf/neuron support reasons
+        sorted_input_block_ids = torch.argsort(input_block_ids)
+        input_ids = torch.index_select(input_ids, 0, sorted_input_block_ids)
+        positions = torch.index_select(positions, 0, sorted_input_block_ids)
+        sampling_params = torch.index_select(sampling_params, 0, sorted_input_block_ids)
+        sorted_input_block_ids = torch.index_select(input_block_ids, 0, sorted_input_block_ids)
+
         output = self.model(input_ids,
                             attention_mask=None,
                             position_ids=positions,
-                            seq_ids=input_block_ids,
+                            seq_ids=sorted_input_block_ids,
                             sampling_params=sampling_params)
         # CTX encoding
         if (positions[:, 0]).sum().item() == 0:
-            return output.fused_outputs[0][:, 0:1]
+            output = output.fused_outputs[0][:, 0:1]
+            if input_block_ids.shape[0] != 1:
+                output = torch.index_select(output, 0, input_block_ids)
+            return output
 
         # Fused Spec (Generation)
         accepted_tokens_with_padding = output.fused_outputs[0]
@@ -358,6 +380,13 @@ class NeuronSpeculationCausalLM(nn.Module):
         mask = torch.arange(steps).expand(batch_size,
                                           -1) >= generated_token_counts
         accepted_tokens_with_padding[mask] = -1
+
+        if input_block_ids.shape[0] != 1:
+            accepted_tokens_with_padding = torch.index_select(
+                accepted_tokens_with_padding,
+                0,
+                input_block_ids
+            )
 
         return accepted_tokens_with_padding
 
