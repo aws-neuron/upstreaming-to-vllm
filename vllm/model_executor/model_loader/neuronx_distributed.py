@@ -279,8 +279,8 @@ class NeuronMllamaForCausalLM(nn.Module):
         try:
             self.model = neuronx_model_cls(compiled_model_path)
             tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
-            self.vision_token_id = tokenizer(
-                "<|image|>", add_special_tokens=False).input_ids
+            self.vision_token_id = tokenizer("<|image|>", 
+                                             add_special_tokens=False).input_ids[0]
             self.model.load(compiled_model_path)
             return
         except (FileNotFoundError, ValueError):
@@ -306,8 +306,8 @@ class NeuronMllamaForCausalLM(nn.Module):
                     compiled_model_path)
 
         # Read "<|image|>" token_id from the tokenizer
-        self.vision_token_id = tokenizer("<|image|>",
-                                         add_special_tokens=False).input_ids
+        self.vision_token_id = tokenizer("<|image|>", 
+                                         add_special_tokens=False).input_ids[0]
         logger.info("\nLoading model from compiled checkpoint...")
         self.model.load(compiled_model_path)
 
