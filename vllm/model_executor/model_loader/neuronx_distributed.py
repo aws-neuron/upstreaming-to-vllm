@@ -85,11 +85,10 @@ class NeuronCausalLM(nn.Module):
         sampling_params: torch.Tensor,
     ) -> torch.Tensor:
         # sort block ids sequentially for perf/neuron support reasons
-        sorted_input_block_ids = torch.argsort(input_block_ids)
-        input_ids = torch.index_select(input_ids, 0, sorted_input_block_ids)
-        positions = torch.index_select(positions, 0, sorted_input_block_ids)
-        sampling_params = torch.index_select(sampling_params, 0, sorted_input_block_ids)
-        sorted_input_block_ids = torch.index_select(input_block_ids, 0, sorted_input_block_ids)
+        sorted_input_block_ids, sorted_indices = torch.sort(input_block_ids)
+        input_ids = torch.index_select(input_ids, 0, sorted_indices)
+        positions = torch.index_select(positions, 0, sorted_indices)
+        sampling_params = torch.index_select(sampling_params, 0, sorted_indices)
     
         output = self.model(input_ids,
                             attention_mask=None,
@@ -103,7 +102,7 @@ class NeuronCausalLM(nn.Module):
             output = output.logits[:, -1, :]
 
         if input_block_ids.shape[0] != 1:
-            output = torch.index_select(output, 0, input_block_ids)
+            output = torch.index_select(output, 0, sorted_indices)
 
         return output
 
