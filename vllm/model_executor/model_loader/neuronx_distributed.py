@@ -88,8 +88,9 @@ class NeuronCausalLM(nn.Module):
         sorted_input_block_ids, sorted_indices = torch.sort(input_block_ids)
         input_ids = torch.index_select(input_ids, 0, sorted_indices)
         positions = torch.index_select(positions, 0, sorted_indices)
-        sampling_params = torch.index_select(sampling_params, 0, sorted_indices)
-    
+        sampling_params = torch.index_select(sampling_params, 0,
+                                             sorted_indices)
+
         output = self.model(input_ids,
                             attention_mask=None,
                             position_ids=positions,
@@ -101,8 +102,9 @@ class NeuronCausalLM(nn.Module):
         else:
             output = output.logits[:, -1, :]
 
+        restored_indices = torch.argsort(sorted_indices)
         if input_block_ids.shape[0] != 1:
-            output = torch.index_select(output, 0, sorted_indices)
+            output = torch.index_select(output, 0, restored_indices)
 
         return output
 
@@ -352,18 +354,21 @@ class NeuronSpeculationCausalLM(nn.Module):
         sorted_input_block_ids, sorted_indices = torch.sort(input_block_ids)
         input_ids = torch.index_select(input_ids, 0, sorted_indices)
         positions = torch.index_select(positions, 0, sorted_indices)
-        sampling_params = torch.index_select(sampling_params, 0, sorted_indices)
+        sampling_params = torch.index_select(sampling_params, 0,
+                                             sorted_indices)
 
         output = self.model(input_ids,
                             attention_mask=None,
                             position_ids=positions,
                             seq_ids=sorted_input_block_ids,
                             sampling_params=sampling_params)
+        restored_indices = torch.argsort(sorted_indices)
+
         # CTX encoding
         if (positions[:, 0]).sum().item() == 0:
             output = output.fused_outputs[0][:, 0:1]
             if input_block_ids.shape[0] != 1:
-                output = torch.index_select(output, 0, sorted_indices)
+                output = torch.index_select(output, 0, restored_indices)
             return output
 
         # Fused Spec (Generation)
@@ -381,10 +386,7 @@ class NeuronSpeculationCausalLM(nn.Module):
 
         if input_block_ids.shape[0] != 1:
             accepted_tokens_with_padding = torch.index_select(
-                accepted_tokens_with_padding,
-                0,
-                sorted_indices
-            )
+                accepted_tokens_with_padding, 0, restored_indices)
 
         return accepted_tokens_with_padding
 
