@@ -21,7 +21,8 @@ CONTEXT_ENCODING_BUCKETS = [1024, 2048]
 TOKEN_GENERATION_BUCKETS = [1024, 2048]
 SEQUENCE_PARALLEL_ENABLED = False
 IS_CONTINUOUS_BATCHING = True
-ON_DEVICE_SAMPLING_CONFIG = {"global_topk":64, "dynamic": True, "deterministic": False}
+ON_DEVICE_SAMPLING_CONFIG = {"global_topk":64, "dynamic": True, \
+                             "deterministic": False}
 
 # Model Inputs
 PROMPTS = ["What is in this image? Tell me a story",
@@ -69,8 +70,9 @@ def print_outputs(outputs):
 
 if __name__ == '__main__':
     assert len(PROMPTS) == len(IMAGES) == len(SAMPLING_PARAMS), \
-        f"""Text, image prompts and sampling parameters should have the same batch size, 
-            got {len(PROMPTS)}, {len(IMAGES)}, and {len(SAMPLING_PARAMS)}"""
+        f"""Text, image prompts and sampling parameters should have the 
+            same batch size; but got {len(PROMPTS)}, {len(IMAGES)}, 
+            and {len(SAMPLING_PARAMS)}"""
 
     # Create an LLM.
     llm = LLM(
@@ -92,7 +94,9 @@ if __name__ == '__main__':
     batched_inputs = []
     batched_sample_params = []
     for pmpt, img, params in zip(PROMPTS, IMAGES, SAMPLING_PARAMS):
-        inputs, sampling_params = get_VLLM_mllama_model_inputs(pmpt, img, params)
+        inputs, sampling_params = get_VLLM_mllama_model_inputs(
+            pmpt, img, params
+            )
         # test batch-size = 1
         outputs = llm.generate(inputs, sampling_params)
         print_outputs(outputs)

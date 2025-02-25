@@ -55,7 +55,6 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import SequenceData
-from vllm.utils import is_list_of
 
 from .clip import CLIPMLP
 from .interfaces import SupportsMultiModal

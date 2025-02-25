@@ -122,7 +122,8 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             num_lookahead_slots=num_lookahead_slots,
         )
 
-        # Neuron does not need to allocate additional blocks for cross attenion layers
+        # Neuron does not need to allocate additional blocks for 
+        # cross attenion layers
         if use_neuronx_distributed():
             seq_group.encoder_seq = None
 

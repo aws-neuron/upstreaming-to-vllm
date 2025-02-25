@@ -130,15 +130,21 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
 
         for input_image in images:
             if isinstance(input_image, PILImage):
-                pixel_values, aspect_ratios, num_chunks = custom_image_preprocessing(self.model.config, [[input_image]])
+                pixel_values, aspect_ratios, num_chunks = \
+                    custom_image_preprocessing(self.model.config, \
+                                               [[input_image]])
                 has_image = torch.tensor([1])
-                image_tensors = [pixel_values.bfloat16().clone().detach(), aspect_ratios, num_chunks, has_image]
+                image_tensors = [pixel_values.bfloat16().clone().detach(), \
+                                 aspect_ratios, num_chunks, has_image]
             else:
-                empty_pixel_values = torch.zeros([1, 1, 4, 3, 560, 560], dtype=torch.bfloat16)
+                empty_pixel_values = torch.zeros([1, 1, 4, 3, 560, 560], \
+                                                 dtype=torch.bfloat16)
                 empty_aspect_ratios = torch.ones([1, 1, 2], dtype=torch.int64)
-                num_chunks = torch.tensor([[1]]) # dummy num_chunks, will not be used
+                # dummy num_chunks, will not be used
+                num_chunks = torch.tensor([[1]])
                 has_image = torch.tensor([0])
-                image_tensors = [empty_pixel_values, empty_aspect_ratios, num_chunks, has_image]
+                image_tensors = [empty_pixel_values, empty_aspect_ratios, \
+                                 num_chunks, has_image ]
 
             pixel_values_list.append(image_tensors[0])
             aspect_ratios_list.append(image_tensors[1])
@@ -146,7 +152,8 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
             has_image_list.append(image_tensors[3])
 
         mm_data["pixel_values"] = torch.cat(pixel_values_list, dim=0).squeeze(0)
-        mm_data["aspect_ratios"] = torch.cat(aspect_ratios_list, dim=0).squeeze(0)
+        mm_data["aspect_ratios"] = torch.cat(aspect_ratios_list, dim=0)\
+            .squeeze(0)
         mm_data["num_chunks"] = torch.cat(num_chunks_list, dim=0).squeeze(0)
         mm_data["has_image"] = torch.cat(has_image_list, dim=0).squeeze(0)
 

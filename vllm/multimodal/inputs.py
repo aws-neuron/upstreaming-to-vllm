@@ -16,7 +16,8 @@ from PIL.Image import Image
 from transformers import BatchFeature
 from typing_extensions import NotRequired, TypeAlias
 
-from vllm.multimodal.neuron_multimodal_image_utils import compress_image_to_tensor
+from vllm.multimodal.neuron_multimodal_image_utils import \
+    compress_image_to_tensor
 from vllm.utils import JSONTree, full_groupby, is_list_of, json_map_leaves
 
 if TYPE_CHECKING:
