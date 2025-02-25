@@ -16,6 +16,7 @@ from PIL.Image import Image
 from transformers import BatchFeature
 from typing_extensions import NotRequired, TypeAlias
 
+from vllm.multimodal.neuron_multimodal_image_utils import compress_image_to_tensor
 from vllm.utils import JSONTree, full_groupby, is_list_of, json_map_leaves
 
 if TYPE_CHECKING:
@@ -599,6 +600,8 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
             return torch.from_numpy(nested_tensors)
         if isinstance(nested_tensors, (int, float)):
             return torch.tensor(nested_tensors)
+        if isinstance(nested_tensors, Image):
+            return compress_image_to_tensor(nested_tensors)
 
         stacked = [MultiModalKwargs._try_stack(t) for t in nested_tensors]
         if not is_list_of(stacked, torch.Tensor, check="all"):

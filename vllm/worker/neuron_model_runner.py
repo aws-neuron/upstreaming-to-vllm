@@ -273,12 +273,12 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                 sampling_params.temperature = temperature
 
         # we need multi_modal_data for later tokens as well
-        multi_modal_inputs_list: List[MultiModalInputs] = []
+        multi_modal_inputs_list: List[MultiModalKwargs] = []
         for seq_group_metadata in seq_group_metadata_list:
             mm_data = seq_group_metadata.multi_modal_data
             if mm_data:
                 multi_modal_inputs_list.append(mm_data)
-        multi_modal_kwargs = MultiModalInputs.batch(multi_modal_inputs_list)
+        multi_modal_kwargs = MultiModalKwargs.batch(multi_modal_inputs_list)
 
         sampling_metadata = SamplingMetadata.prepare(
             seq_group_metadata_list,

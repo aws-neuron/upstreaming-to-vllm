@@ -123,6 +123,8 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
         has_image_list = []
         images = mm_data.get('image')
 
+        if isinstance(images, PILImage):
+            images = [images]
         if isinstance(images, torch.Tensor):
             images = [images]
 
