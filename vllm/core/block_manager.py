@@ -13,7 +13,7 @@ from vllm.core.block.utils import check_no_caching_or_swa_for_blockmgr_encdec
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
-from vllm.worker.neuron_worker import use_neuronx_distributed
+from vllm.worker.utils import use_neuronx_distributed
 
 SeqId = int
 EncoderSeqId = str
@@ -122,8 +122,9 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             num_lookahead_slots=num_lookahead_slots,
         )
 
-        # Neuron does not need to allocate additional blocks for 
-        # cross attenion layers
+        # On Neuron, cross attention queries use the same memory allocations as
+        # the decoder sequence. Thus set encoder_seq = None to avoid
+        # redundant memory allocations on Neuron.
         if use_neuronx_distributed():
             seq_group.encoder_seq = None
 

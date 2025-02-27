@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from typing import List, Optional
-from PIL.Image import Image as PILImage
+
 import torch
-from neuronx_distributed_inference.modules.generation.sampling import (
-    prepare_sampling_params)
 from neuronx_distributed_inference.models.mllama.image_transform import (
     custom_image_preprocessing)
+from neuronx_distributed_inference.modules.generation.sampling import (
+    prepare_sampling_params)
+from PIL.Image import Image as PILImage
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -85,8 +86,10 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
                 input_ids=model_input.input_tokens,
                 positions=model_input.input_positions,
                 seq_ids=model_input.input_block_ids,
-                pixel_values=model_input.multi_modal_kwargs.get('pixel_values'),
-                aspect_ratios=model_input.multi_modal_kwargs.get('aspect_ratios'),
+                pixel_values=model_input.multi_modal_kwargs.get(
+                    'pixel_values'),
+                aspect_ratios=model_input.multi_modal_kwargs.get(
+                    'aspect_ratios'),
                 sampling_params=sampling_params,
                 num_chunks=model_input.multi_modal_kwargs.get('num_chunks'),
                 has_image=model_input.multi_modal_kwargs.get('has_image'),
@@ -151,7 +154,8 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
             num_chunks_list.append(image_tensors[2])
             has_image_list.append(image_tensors[3])
 
-        mm_data["pixel_values"] = torch.cat(pixel_values_list, dim=0).squeeze(0)
+        mm_data["pixel_values"] = torch.cat(pixel_values_list,
+                                            dim=0).squeeze(0)
         mm_data["aspect_ratios"] = torch.cat(aspect_ratios_list, dim=0)\
             .squeeze(0)
         mm_data["num_chunks"] = torch.cat(num_chunks_list, dim=0).squeeze(0)

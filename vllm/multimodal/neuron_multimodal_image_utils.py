@@ -1,16 +1,18 @@
+# SPDX-License-Identifier: Apache-2.0
 import base64
 import binascii
 import functools
 import logging
 import signal
 from io import BytesIO
-import torch
+
 import numpy as np
-from torchvision import transforms
-from PIL import Image, UnidentifiedImageError
-from PIL.Image import DecompressionBombError, DecompressionBombWarning, \
-    Image as PILImage
+import torch
 from fastapi.exceptions import RequestValidationError
+from PIL import Image, UnidentifiedImageError
+from PIL.Image import DecompressionBombError, DecompressionBombWarning
+from PIL.Image import Image as PILImage
+from torchvision import transforms
 
 IMAGE_METADATA_TOO_LARGE_ERROR = 'Decompressed Data Too Large'
 IMAGE_TOKEN_DENOMINATOR = 750
@@ -19,7 +21,9 @@ logger = logging.getLogger(__name__)
 
 
 def timeout(seconds=10, error_cls=TimeoutError, error_message="Timed out"):
+
     def decorator(func):
+
         def _handle_timeout(signum, frame):
             raise error_cls(error_message)
 
@@ -32,6 +36,7 @@ def timeout(seconds=10, error_cls=TimeoutError, error_message="Timed out"):
             finally:
                 signal.alarm(0)
             return result
+
         return wrapper
 
     return decorator
@@ -71,19 +76,23 @@ def convert_image_to_np_array(image: PILImage):
     except OSError as e:
         raise RequestValidationError("INVALID_IMAGE") from e
 
+
 def compress_image_to_tensor(image: PILImage):
     to_tensor = transforms.ToTensor()
     return to_tensor(image)
 
+
 def decompress_image_from_tensor(tensor: torch.Tensor):
     to_pil = transforms.ToPILImage()
     return to_pil(tensor)
+
 
 def compress_image_to_b64_str(image: PILImage):
     buffer = BytesIO()
     image.save(buffer, "png")
     buffer.seek(0)
     return base64.b64encode(buffer.read()).decode("utf-8")
+
 
 def get_random_image_b64_str(width=16, height=16, img_format="png"):
     image = Image.fromarray((np.random.rand(width, height, 3) * 255)\

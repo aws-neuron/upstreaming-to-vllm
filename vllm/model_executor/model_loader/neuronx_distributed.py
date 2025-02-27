@@ -279,8 +279,8 @@ class NeuronMllamaForCausalLM(nn.Module):
         try:
             self.model = neuronx_model_cls(compiled_model_path)
             tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
-            self.vision_token_id = tokenizer("<|image|>", 
-                                             add_special_tokens=False).input_ids[0]
+            self.vision_token_id = tokenizer(
+                "<|image|>", add_special_tokens=False).input_ids[0]
             self.model.load(compiled_model_path)
             return
         except (FileNotFoundError, ValueError):
@@ -306,7 +306,7 @@ class NeuronMllamaForCausalLM(nn.Module):
                     compiled_model_path)
 
         # Read "<|image|>" token_id from the tokenizer
-        self.vision_token_id = tokenizer("<|image|>", 
+        self.vision_token_id = tokenizer("<|image|>",
                                          add_special_tokens=False).input_ids[0]
         logger.info("\nLoading model from compiled checkpoint...")
         self.model.load(compiled_model_path)
@@ -471,6 +471,7 @@ class NeuronSpeculationCausalLM(nn.Module):
         self.model = neuronx_model_cls(model_name_or_path, config)
         self.model.compile(compiled_model_path)
         self.model.load(compiled_model_path)
+
 
 def _get_model_architecture(config: PretrainedConfig) -> str:
     architectures = getattr(config, "architectures", [])
