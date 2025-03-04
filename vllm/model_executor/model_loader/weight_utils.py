@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Utilities for downloading and initializing model weights."""
 import fnmatch
 import glob
@@ -6,7 +7,7 @@ import json
 import os
 import tempfile
 from collections import defaultdict
-from typing import Any, Dict, Generator, Iterable, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Generator, List, Optional, Tuple, Union
 
 import filelock
 import gguf
@@ -16,16 +17,24 @@ import torch
 from huggingface_hub import HfFileSystem, hf_hub_download, snapshot_download
 from safetensors.torch import load_file, safe_open, save_file
 from tqdm.auto import tqdm
-from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 from vllm.config import LoadConfig, ModelConfig
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QuantizationConfig,
                                                      get_quantization_config)
-from vllm.model_executor.layers.quantization.schema import QuantParamSchema
 from vllm.platforms import current_platform
-from vllm.utils import print_warning_once
+from vllm.utils import PlaceholderModule
+
+try:
+    from runai_model_streamer import SafetensorsStreamer
+except (ImportError, OSError):
+    # see https://github.com/run-ai/runai-model-streamer/issues/26
+    # OSError will be raised on arm64 platform
+    runai_model_streamer = PlaceholderModule(
+        "runai_model_streamer")  # type: ignore[assignment]
+    SafetensorsStreamer = runai_model_streamer.placeholder_attr(
+        "SafetensorsStreamer")
 
 logger = init_logger(__name__)
 
@@ -85,7 +94,7 @@ def convert_bin_to_safetensor_file(
     pt_filename: str,
     sf_filename: str,
 ) -> None:
-    loaded = torch.load(pt_filename, map_location="cpu")
+    loaded = torch.load(pt_filename, map_location="cpu", weights_only=True)
     if "state_dict" in loaded:
         loaded = loaded["state_dict"]
     shared = _shared_pointers(loaded)
@@ -188,11 +197,18 @@ def get_quant_config(model_config: ModelConfig,
             f"{quant_config_files}")
 
     quant_config_file = quant_config_files[0]
-    with open(quant_config_file, "r") as f:
+    with open(quant_config_file) as f:
         config = json.load(f)
 
         if model_config.quantization == "bitsandbytes":
             config["adapter_name_or_path"] = model_name_or_path
+        elif model_config.quantization == "modelopt":
+            if config["producer"]["name"] == "modelopt":
+                return quant_cls.from_config(config)
+            else:
+                raise ValueError(
+                    f"Unsupported quantization config"
+                    f" found for {model_config.quantization} in {f}.")
 
     return quant_cls.from_config(config)
 
@@ -251,6 +267,7 @@ def download_weights_from_hf(
 
 def download_safetensors_index_file_from_hf(
     model_name_or_path: str,
+    index_file: str,
     cache_dir: Optional[str],
     revision: Optional[str] = None,
 ) -> None:
@@ -269,36 +286,37 @@ def download_safetensors_index_file_from_hf(
             # Download the safetensors index file.
             hf_hub_download(
                 repo_id=model_name_or_path,
-                filename=SAFE_WEIGHTS_INDEX_NAME,
+                filename=index_file,
                 cache_dir=cache_dir,
                 revision=revision,
                 local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
             )
         # If file not found on remote or locally, we should not fail since
-        # only some models will have SAFE_WEIGHTS_INDEX_NAME.
+        # only some models will have index_file.
         except huggingface_hub.utils.EntryNotFoundError:
-            logger.info("No %s found in remote.", SAFE_WEIGHTS_INDEX_NAME)
+            logger.info("No %s found in remote.", index_file)
         except huggingface_hub.utils.LocalEntryNotFoundError:
-            logger.info("No %s found in local cache.", SAFE_WEIGHTS_INDEX_NAME)
+            logger.info("No %s found in local cache.", index_file)
 
 
 # For models like Mistral-7B-v0.3, there are both sharded
 # safetensors files and a consolidated safetensors file.
 # Passing both of these to the weight loader functionality breaks.
-# So, we use the SAFE_WEIGHTS_INDEX_NAME to
+# So, we use the index_file to
 # look up which safetensors files should be used.
 def filter_duplicate_safetensors_files(hf_weights_files: List[str],
-                                       hf_folder: str) -> List[str]:
+                                       hf_folder: str,
+                                       index_file: str) -> List[str]:
     # model.safetensors.index.json is a mapping from keys in the
     # torch state_dict to safetensors file holding that weight.
-    index_file_name = os.path.join(hf_folder, SAFE_WEIGHTS_INDEX_NAME)
+    index_file_name = os.path.join(hf_folder, index_file)
     if not os.path.isfile(index_file_name):
         return hf_weights_files
 
     # Iterate through the weight_map (weight_name: safetensors files)
     # to identify weights that we should use.
-    with open(index_file_name) as index_file:
-        weight_map = json.load(index_file)["weight_map"]
+    with open(index_file_name) as f:
+        weight_map = json.load(f)["weight_map"]
     weight_files_in_index = set()
     for weight_name in weight_map:
         weight_files_in_index.add(
@@ -364,7 +382,9 @@ def np_cache_weights_iterator(
                     disable=not enable_tqdm,
                     bar_format=_BAR_FORMAT,
             ):
-                state = torch.load(bin_file, map_location="cpu")
+                state = torch.load(bin_file,
+                                   map_location="cpu",
+                                   weights_only=True)
                 for name, param in state.items():
                     param_path = os.path.join(np_folder, name)
                     with open(param_path, "wb") as f:
@@ -373,7 +393,7 @@ def np_cache_weights_iterator(
             with open(weight_names_file, "w") as f:
                 json.dump(weight_names, f)
 
-    with open(weight_names_file, "r") as f:
+    with open(weight_names_file) as f:
         weight_names = json.load(f)
 
     for name in weight_names:
@@ -401,6 +421,23 @@ def safetensors_weights_iterator(
                 yield name, param
 
 
+def runai_safetensors_weights_iterator(
+    hf_weights_files: List[str]
+) -> Generator[Tuple[str, torch.Tensor], None, None]:
+    """Iterate over the weights in the model safetensor files."""
+    enable_tqdm = not torch.distributed.is_initialized(
+    ) or torch.distributed.get_rank() == 0
+    with SafetensorsStreamer() as streamer:
+        for st_file in tqdm(
+                hf_weights_files,
+                desc="Loading safetensors using Runai Model Streamer",
+                disable=not enable_tqdm,
+                bar_format=_BAR_FORMAT,
+        ):
+            streamer.stream_file(st_file)
+            yield from streamer.get_tensors()
+
+
 def pt_weights_iterator(
     hf_weights_files: List[str]
 ) -> Generator[Tuple[str, torch.Tensor], None, None]:
@@ -413,9 +450,8 @@ def pt_weights_iterator(
             disable=not enable_tqdm,
             bar_format=_BAR_FORMAT,
     ):
-        state = torch.load(bin_file, map_location="cpu")
-        for name, param in state.items():
-            yield name, param
+        state = torch.load(bin_file, map_location="cpu", weights_only=True)
+        yield from state.items()
         del state
         torch.cuda.empty_cache()
 
@@ -459,46 +495,6 @@ def gguf_quant_weights_iterator(
                 name = name.replace("weight", "qweight")
             param = torch.tensor(weight)
             yield name, param
-
-
-def kv_cache_scales_loader(
-        filename: str, tp_rank: int, tp_size: int, num_hidden_layers: int,
-        model_type: Optional[str]) -> Iterable[Tuple[int, float]]:
-    """
-    A simple utility to read in KV cache scaling factors that have been
-    previously serialized to disk. Used by the model to populate the appropriate
-    KV cache scaling factors. The serialization should represent a dictionary
-    whose keys are the TP ranks and values are another dictionary mapping layers
-    to their KV cache scaling factors.
-    Keep this function in sync with the output of examples/fp8/extract_scales.py
-    """
-    try:
-        with open(filename) as f:
-            context = {
-                "model_type": model_type,
-                "num_hidden_layers": num_hidden_layers,
-                "tp_rank": tp_rank,
-                "tp_size": tp_size,
-            }
-            schema_dct = json.load(f)
-            schema = QuantParamSchema.model_validate(schema_dct,
-                                                     context=context)
-            layer_scales_map = schema.kv_cache.scaling_factor[tp_rank]
-            return layer_scales_map.items()
-
-    except FileNotFoundError:
-        logger.error("File or directory '%s' not found.", filename)
-    except json.JSONDecodeError:
-        logger.error("Error decoding JSON in file '%s'.", filename)
-    except Exception as e:
-        logger.error("An error occurred while reading '%s': %s", filename, e)
-    # This section is reached if and only if any of the excepts are hit
-    # Return an empty iterable (list) => no KV cache scales are loaded
-    # which ultimately defaults to 1.0 scales
-    logger.warning(
-        "Defaulting to KV cache scaling factors = 1.0 for all "
-        "layers in TP rank %d as an error occurred during loading.", tp_rank)
-    return []
 
 
 def convert_pyslice_to_tensor(x: Any) -> torch.Tensor:
@@ -549,6 +545,38 @@ def row_parallel_weight_loader(param: torch.Tensor,
         loaded_weight = loaded_weight.narrow(shard_dim, start_idx, shard_size)
 
     return default_weight_loader(param, loaded_weight)
+
+
+LoaderFunction = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
+
+
+def sharded_weight_loader(shard_axis: int) -> LoaderFunction:
+    """Create a weight loader that shards the weights along the given axis"""
+
+    def loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
+        tp_rank = get_tensor_model_parallel_rank()
+
+        shard_size = param.data.shape[shard_axis]
+        start_idx = tp_rank * shard_size
+        loaded_weight = loaded_weight.narrow(shard_axis, start_idx, shard_size)
+
+        return default_weight_loader(param, loaded_weight)
+
+    return loader
+
+
+def composed_weight_loader(
+        loader: LoaderFunction, fn: Callable[[torch.Tensor],
+                                             torch.Tensor]) -> LoaderFunction:
+    """Create a weight loader that post-processes the weights after loading"""
+
+    def composed_loader(param: torch.Tensor,
+                        loaded_weight: torch.Tensor) -> None:
+        loader(param, loaded_weight)
+        param.data.copy_(fn(param))
+        return
+
+    return composed_loader
 
 
 def initialize_dummy_weights(
@@ -607,7 +635,7 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> Optional[str]:
         None: If the remapped name is not found in params_dict.
     """
     if name.endswith(".kv_scale"):
-        print_warning_once(
+        logger.warning_once(
             "DEPRECATED. Found kv_scale in the checkpoint. "
             "This format is deprecated in favor of separate k_scale and "
             "v_scale tensors and will be removed in a future release. "
@@ -616,7 +644,7 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> Optional[str]:
         # NOTE: we remap the deprecated kv_scale to k_scale
         remapped_name = name.replace(".kv_scale", ".attn.k_scale")
         if remapped_name not in params_dict:
-            print_warning_once(
+            logger.warning_once(
                 f"Found kv_scale in the checkpoint (e.g. {name}), "
                 "but not found the expected name in the model "
                 f"(e.g. {remapped_name}). kv_scale is "
@@ -625,11 +653,20 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> Optional[str]:
         return remapped_name
 
     possible_scale_names = [".k_scale", ".v_scale"]
+    modelopt_scale_names = [
+        ".self_attn.k_proj.k_scale", ".self_attn.v_proj.v_scale"
+    ]
     for scale_name in possible_scale_names:
         if name.endswith(scale_name):
-            remapped_name = name.replace(scale_name, f".attn{scale_name}")
+            if any(mo_scale_name in name
+                   for mo_scale_name in modelopt_scale_names):
+                remapped_name = name.replace(
+                    f".self_attn.{scale_name[1]}_proj{scale_name}",
+                    f".self_attn.attn{scale_name}")
+            else:
+                remapped_name = name.replace(scale_name, f".attn{scale_name}")
             if remapped_name not in params_dict:
-                print_warning_once(
+                logger.warning_once(
                     f"Found {scale_name} in the checkpoint (e.g. {name}), "
                     "but not found the expected name in the model "
                     f"(e.g. {remapped_name}). {scale_name} is "

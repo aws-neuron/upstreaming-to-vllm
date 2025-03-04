@@ -1,5 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import time
-from typing import Callable, Optional
+from typing import Callable, Optional, Union
 
 import msgspec
 import torch
@@ -81,8 +83,21 @@ class AsyncMetricsCollector:
         self._rank = rank
         self._copy_stream = torch.cuda.Stream()
 
+    def init_tensors(self,
+                     rank: int,
+                     device_type: Union[torch.device, str] = 'cuda') -> None:
+        self._rank = rank
+        if isinstance(device_type, torch.device):
+            device_type = device_type.type
+        if device_type == 'cuda':
+            self._copy_stream = torch.cuda.Stream()
+
     def maybe_collect_rejsample_metrics(
             self, k: int) -> Optional[SpecDecodeWorkerMetrics]:
+        # currently using cuda.Event, skip for any non_cuda_alike platform
+        from vllm.platforms import current_platform
+        if not current_platform.is_cuda_alike():
+            return None
 
         # If a copy was initiated in the previous call, collect and return.
         if self._in_flight_copy is not None:
@@ -104,13 +119,10 @@ class AsyncMetricsCollector:
         if self._rank != 0:
             return False
 
-        if (now - self._last_metrics_collect_time <
-                self._rejsample_metrics_collect_interval_s):
-            return False
-        return True
+        return now - self._last_metrics_collect_time >= self._rejsample_metrics_collect_interval_s  # noqa: E501
 
     def _copy_rejsample_metrics_async(self) -> torch.cuda.Event:
-        """Copy rejection/typical-acceptance sampling metrics 
+        """Copy rejection/typical-acceptance sampling metrics
         (number of accepted tokens, etc) to CPU asynchronously.
 
         Returns a CUDA event recording when the copy is complete.

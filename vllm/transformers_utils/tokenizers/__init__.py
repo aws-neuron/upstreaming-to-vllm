@@ -1,5 +1,5 @@
-from vllm.transformers_utils.tokenizers.baichuan import BaichuanTokenizer
+# SPDX-License-Identifier: Apache-2.0
 
-__all__ = [
-    "BaichuanTokenizer",
-]
+from .mistral import MistralTokenizer, maybe_serialize_tool_calls
+
+__all__ = ["MistralTokenizer", "maybe_serialize_tool_calls"]

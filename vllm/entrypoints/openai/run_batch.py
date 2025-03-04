@@ -1,9 +1,14 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import asyncio
+from http import HTTPStatus
 from io import StringIO
-from typing import Awaitable, Callable, List
+from typing import Awaitable, Callable, List, Optional
 
 import aiohttp
+import torch
 from prometheus_client import start_http_server
+from tqdm import tqdm
 
 from vllm.engine.arg_utils import AsyncEngineArgs, nullable_str
 from vllm.engine.async_llm_engine import AsyncLLMEngine
@@ -13,10 +18,14 @@ from vllm.entrypoints.openai.protocol import (BatchRequestInput,
                                               BatchRequestOutput,
                                               BatchResponseData,
                                               ChatCompletionResponse,
-                                              EmbeddingResponse, ErrorResponse)
+                                              EmbeddingResponse, ErrorResponse,
+                                              ScoreResponse)
 # yapf: enable
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
+from vllm.entrypoints.openai.serving_models import (BaseModelPath,
+                                                    OpenAIServingModels)
+from vllm.entrypoints.openai.serving_score import OpenAIServingScores
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import FlexibleArgumentParser, random_uuid
 from vllm.version import __version__ as VLLM_VERSION
@@ -74,8 +83,45 @@ def parse_args():
         help="Port number for the Prometheus metrics server "
         "(only needed if enable-metrics is set).",
     )
+    parser.add_argument(
+        "--enable-prompt-tokens-details",
+        action='store_true',
+        default=False,
+        help="If set to True, enable prompt_tokens_details in usage.")
 
     return parser.parse_args()
+
+
+# explicitly use pure text format, with a newline at the end
+# this makes it impossible to see the animation in the progress bar
+# but will avoid messing up with ray or multiprocessing, which wraps
+# each line of output with some prefix.
+_BAR_FORMAT = "{desc}: {percentage:3.0f}% Completed | {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]\n"  # noqa: E501
+
+
+class BatchProgressTracker:
+
+    def __init__(self):
+        self._total = 0
+        self._pbar: Optional[tqdm] = None
+
+    def submitted(self):
+        self._total += 1
+
+    def completed(self):
+        if self._pbar:
+            self._pbar.update()
+
+    def pbar(self) -> tqdm:
+        enable_tqdm = not torch.distributed.is_initialized(
+        ) or torch.distributed.get_rank() == 0
+        self._pbar = tqdm(total=self._total,
+                          unit="req",
+                          desc="Running batch",
+                          mininterval=5,
+                          disable=not enable_tqdm,
+                          bar_format=_BAR_FORMAT)
+        return self._pbar
 
 
 async def read_file(path_or_url: str) -> str:
@@ -84,7 +130,7 @@ async def read_file(path_or_url: str) -> str:
                    session.get(path_or_url) as resp:
             return await resp.text()
     else:
-        with open(path_or_url, "r", encoding="utf-8") as f:
+        with open(path_or_url, encoding="utf-8") as f:
             return f.read()
 
 
@@ -101,11 +147,32 @@ async def write_file(path_or_url: str, data: str) -> None:
             f.write(data)
 
 
+def make_error_request_output(request: BatchRequestInput,
+                              error_msg: str) -> BatchRequestOutput:
+    batch_output = BatchRequestOutput(
+        id=f"vllm-{random_uuid()}",
+        custom_id=request.custom_id,
+        response=BatchResponseData(
+            status_code=HTTPStatus.BAD_REQUEST,
+            request_id=f"vllm-batch-{random_uuid()}",
+        ),
+        error=error_msg,
+    )
+    return batch_output
+
+
+async def make_async_error_request_output(
+        request: BatchRequestInput, error_msg: str) -> BatchRequestOutput:
+    return make_error_request_output(request, error_msg)
+
+
 async def run_request(serving_engine_func: Callable,
-                      request: BatchRequestInput) -> BatchRequestOutput:
+                      request: BatchRequestInput,
+                      tracker: BatchProgressTracker) -> BatchRequestOutput:
     response = await serving_engine_func(request.body)
 
-    if isinstance(response, (ChatCompletionResponse, EmbeddingResponse)):
+    if isinstance(response,
+                  (ChatCompletionResponse, EmbeddingResponse, ScoreResponse)):
         batch_output = BatchRequestOutput(
             id=f"vllm-{random_uuid()}",
             custom_id=request.custom_id,
@@ -123,8 +190,10 @@ async def run_request(serving_engine_func: Callable,
             error=response,
         )
     else:
-        raise ValueError("Request must not be sent in stream mode")
+        batch_output = make_error_request_output(
+            request, error_msg="Request must not be sent in stream mode")
 
+    tracker.completed()
     return batch_output
 
 
@@ -138,8 +207,11 @@ async def main(args):
     engine = AsyncLLMEngine.from_engine_args(
         engine_args, usage_context=UsageContext.OPENAI_BATCH_RUNNER)
 
-    # When using single vLLM without engine_use_ray
     model_config = await engine.get_model_config()
+    base_model_paths = [
+        BaseModelPath(name=name, model_path=args.model)
+        for name in served_model_names
+    ]
 
     if args.disable_log_requests:
         request_logger = None
@@ -147,22 +219,40 @@ async def main(args):
         request_logger = RequestLogger(max_log_len=args.max_log_len)
 
     # Create the openai serving objects.
+    openai_serving_models = OpenAIServingModels(
+        engine_client=engine,
+        model_config=model_config,
+        base_model_paths=base_model_paths,
+        lora_modules=None,
+        prompt_adapters=None,
+    )
     openai_serving_chat = OpenAIServingChat(
         engine,
         model_config,
-        served_model_names,
+        openai_serving_models,
         args.response_role,
-        lora_modules=None,
-        prompt_adapters=None,
         request_logger=request_logger,
         chat_template=None,
-    )
+        chat_template_content_format="auto",
+        enable_prompt_tokens_details=args.enable_prompt_tokens_details,
+    ) if model_config.runner_type == "generate" else None
     openai_serving_embedding = OpenAIServingEmbedding(
         engine,
         model_config,
-        served_model_names,
+        openai_serving_models,
         request_logger=request_logger,
-    )
+        chat_template=None,
+        chat_template_content_format="auto",
+    ) if model_config.task == "embed" else None
+    openai_serving_scores = (OpenAIServingScores(
+        engine,
+        model_config,
+        openai_serving_models,
+        request_logger=request_logger,
+    ) if model_config.task == "score" else None)
+
+    tracker = BatchProgressTracker()
+    logger.info("Reading batch from %s...", args.input_file)
 
     # Submit all requests in the file to the engine "concurrently".
     response_futures: List[Awaitable[BatchRequestOutput]] = []
@@ -176,18 +266,56 @@ async def main(args):
 
         # Determine the type of request and run it.
         if request.url == "/v1/chat/completions":
-            response_futures.append(
-                run_request(openai_serving_chat.create_chat_completion,
-                            request))
-        elif request.url == "/v1/embeddings":
-            response_futures.append(
-                run_request(openai_serving_embedding.create_embedding,
-                            request))
-        else:
-            raise ValueError("Only /v1/chat/completions and /v1/embeddings are"
-                             "supported in the batch endpoint.")
+            handler_fn = (None if openai_serving_chat is None else
+                          openai_serving_chat.create_chat_completion)
+            if handler_fn is None:
+                response_futures.append(
+                    make_async_error_request_output(
+                        request,
+                        error_msg=
+                        "The model does not support Chat Completions API",
+                    ))
+                continue
 
-    responses = await asyncio.gather(*response_futures)
+            response_futures.append(run_request(handler_fn, request, tracker))
+            tracker.submitted()
+        elif request.url == "/v1/embeddings":
+            handler_fn = (None if openai_serving_embedding is None else
+                          openai_serving_embedding.create_embedding)
+            if handler_fn is None:
+                response_futures.append(
+                    make_async_error_request_output(
+                        request,
+                        error_msg="The model does not support Embeddings API",
+                    ))
+                continue
+
+            response_futures.append(run_request(handler_fn, request, tracker))
+            tracker.submitted()
+        elif request.url == "/v1/score":
+            handler_fn = (None if openai_serving_scores is None else
+                          openai_serving_scores.create_score)
+            if handler_fn is None:
+                response_futures.append(
+                    make_async_error_request_output(
+                        request,
+                        error_msg="The model does not support Scores API",
+                    ))
+                continue
+
+            response_futures.append(run_request(handler_fn, request, tracker))
+            tracker.submitted()
+        else:
+            response_futures.append(
+                make_async_error_request_output(
+                    request,
+                    error_msg=
+                    "Only /v1/chat/completions, /v1/embeddings, and /v1/score "
+                    "are supported in the batch endpoint.",
+                ))
+
+    with tracker.pbar():
+        responses = await asyncio.gather(*response_futures)
 
     output_buffer = StringIO()
     for response in responses:

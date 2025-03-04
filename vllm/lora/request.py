@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import warnings
 from typing import Optional
 
@@ -28,10 +30,10 @@ class LoRARequest(
     lora_path: str = ""
     lora_local_path: Optional[str] = msgspec.field(default=None)
     long_lora_max_len: Optional[int] = None
-    __hash__ = AdapterRequest.__hash__
+    base_model_name: Optional[str] = msgspec.field(default=None)
 
     def __post_init__(self):
-        if 'lora_local_path' in self.__struct_fields__:
+        if self.lora_local_path:
             warnings.warn(
                 "The 'lora_local_path' attribute is deprecated "
                 "and will be removed in a future version. "
@@ -75,3 +77,21 @@ class LoRARequest(
             DeprecationWarning,
             stacklevel=2)
         self.lora_path = value
+
+    def __eq__(self, value: object) -> bool:
+        """
+        Overrides the equality method to compare LoRARequest
+        instances based on lora_name. This allows for identification
+        and comparison lora adapter across engines.
+        """
+        return isinstance(value,
+                          self.__class__) and self.lora_name == value.lora_name
+
+    def __hash__(self) -> int:
+        """
+        Overrides the hash method to hash LoRARequest instances
+        based on lora_name. This ensures that LoRARequest instances
+        can be used in hash-based collections such as sets and dictionaries,
+        identified by their names across engines.
+        """
+        return hash(self.lora_name)

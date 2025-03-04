@@ -2,6 +2,6 @@
 -r requirements-common.txt
 
 # Dependencies for Neuron devices
-transformers-neuronx >= 0.9.0
-torch-neuronx >= 2.1.0
-neuronx-cc
+torch-neuronx >= 2.5.0
+neuronx-cc>=2.0.0a0
+torchvision # Required for Llama3.2 multimodal image preprocessing

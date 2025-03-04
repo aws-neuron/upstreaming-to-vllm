@@ -1,18 +1,24 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import dataclasses
 from abc import ABC, abstractmethod
 from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional, Type,
                     TypeVar)
 
 import torch
+import torch.nn as nn
 
-from vllm.platforms import current_platform
-from vllm.sequence import (IntermediateTensors, SamplerOutput,
-                           SequenceGroupMetadata)
+from vllm.config import VllmConfig
+from vllm.logger import init_logger
+from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
 
 if TYPE_CHECKING:
     from vllm.attention import AttentionMetadata
     from vllm.attention.backends.abstract import AttentionBackend
     from vllm.model_executor import SamplingMetadata
+
+logger = init_logger(__name__)
 
 T = TypeVar('T', bound="BroadcastableModelInput")
 
@@ -39,9 +45,8 @@ def _init_attn_metadata_from_tensor_dict(
     # Extract the fields used to create AttentionMetadata.
     valid_attn_kwargs = {}
     for field in dataclasses.fields(attn_backend.get_metadata_cls()):
-        val = tensor_dict.pop(field.name, None)
-        if val is not None:
-            valid_attn_kwargs[field.name] = val
+        if field.name in tensor_dict:
+            valid_attn_kwargs[field.name] = tensor_dict.pop(field.name)
 
     attn_metadata = attn_backend.make_metadata(**valid_attn_kwargs)
     tensor_dict["attn_metadata"] = attn_metadata
@@ -141,6 +146,11 @@ class ModelRunnerInputBuilderBase(ABC, Generic[T]):
   """
 
     @abstractmethod
+    def prepare(self,
+                finished_requests_ids: Optional[List[str]] = None) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
     def add_seq_group(self, seq_group_metadata):
         """TBA"""
         raise NotImplementedError
@@ -160,6 +170,22 @@ class ModelRunnerBase(ABC, Generic[T]):
     Each ModelRunnerBase subclass should define a corresponding
     ModelRunnerInputBase subclass.
     """
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+    ) -> None:
+        self.vllm_config = vllm_config
+        self.model_config = vllm_config.model_config
+        self.cache_config = vllm_config.cache_config
+        self.lora_config = vllm_config.lora_config
+        self.load_config = vllm_config.load_config
+        self.parallel_config = vllm_config.parallel_config
+        self.scheduler_config = vllm_config.scheduler_config
+        self.device_config = vllm_config.device_config
+        self.speculative_config = vllm_config.speculative_config
+        self.prompt_adapter_config = vllm_config.prompt_adapter_config
+        self.observability_config = vllm_config.observability_config
 
     # Map of request_id -> generator used for seeded random sampling
     generators: Dict[str, torch.Generator] = {}
@@ -189,13 +215,17 @@ class ModelRunnerBase(ABC, Generic[T]):
         """
         raise NotImplementedError
 
-    @current_platform.inference_mode()
+    @abstractmethod
+    def get_model(self) -> nn.Module:
+        raise NotImplementedError
+
     def execute_model(
         self,
         model_input: T,
         kv_caches: Optional[List[torch.Tensor]],
-        intermediate_tensors: Optional[IntermediateTensors],
+        intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
+        **kwargs,
     ) -> Optional[List[SamplerOutput]]:
         """
         Execute the model on the given input.
@@ -213,3 +243,18 @@ class ModelRunnerBase(ABC, Generic[T]):
                 self.generators.pop(request_id, None)
 
         return self.generators
+
+
+class ModelRunnerWrapperBase:
+    """
+    The whole point of this class is to lazily initialize the model_runner.
+    """
+
+    def __init__(
+        self,
+        model_runner: ModelRunnerBase,
+    ) -> None:
+        self.model_runner: ModelRunnerBase = model_runner
+
+    def __getattr__(self, attr):
+        return getattr(self.model_runner, attr)
