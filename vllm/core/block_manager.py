@@ -11,6 +11,7 @@ from vllm.core.block.prefix_caching_block import (ComputedBlocksTracker,
                                                   LastAccessBlocksTracker)
 from vllm.core.block.utils import check_no_caching_or_swa_for_blockmgr_encdec
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
+from vllm.platforms import current_platform
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
 
@@ -120,6 +121,12 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             block_size=self.block_size,
             num_lookahead_slots=num_lookahead_slots,
         )
+
+        # On Neuron, cross attention queries use the same memory allocations as
+        # the decoder sequence. Thus set encoder_seq = None to avoid
+        # redundant memory allocations on Neuron.
+        if current_platform.is_neuron():
+            seq_group.encoder_seq = None
 
         if seq_group.is_encoder_decoder():
             encoder_seq = seq_group.get_encoder_seq()

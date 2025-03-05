@@ -3,8 +3,11 @@
 from typing import List, Optional
 
 import torch
+from neuronx_distributed_inference.models.mllama.image_transform import (
+    custom_image_preprocessing)
 from neuronx_distributed_inference.modules.generation.sampling import (
     prepare_sampling_params)
+from PIL.Image import Image as PILImage
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -15,9 +18,6 @@ from vllm.sequence import IntermediateTensors
 from vllm.worker.neuron_model_runner import (ModelInputForNeuron,
                                              NeuronModelRunner)
 
-# FIXME(Neuron): need to restore multi-modal support
-# from vllm.multimodal.neuron_multimodal_image_utils import \
-#     decompress_image_from_tensor
 logger = init_logger(__name__)
 
 
@@ -61,10 +61,6 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
             temperature=temperature)
         return sampling_params
 
-    def get_multi_modal_data_neuron(self, input_images):
-        # FIXME(Neuron): need to restore multi-modal support
-        raise NotImplementedError("need to restore multi-modal support")
-
     @torch.inference_mode()
     def execute_model(
         self,
@@ -86,33 +82,17 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
             model_input.sampling_metadata)
 
         if model_input.multi_modal_kwargs.get('image') is not None:
-            pixel_values = []
-            aspect_ratios = []
-            num_chunks = []
-            has_image = []
-            for multi_modal_input in model_input.multi_modal_kwargs.get(
-                    'image'):
-                image_tensors = self.get_multi_modal_data_neuron(
-                    multi_modal_input.squeeze(0))
-                pixel_values.append(image_tensors[0])
-                aspect_ratios.append(image_tensors[1])
-                num_chunks.append(image_tensors[2])
-                has_image.append(image_tensors[3])
-
-            pixel_values = torch.cat(pixel_values, dim=0)
-            aspect_ratios = torch.cat(aspect_ratios, dim=0)
-            num_chunks = torch.cat(num_chunks, dim=0)
-            has_image = torch.cat(has_image, dim=0)
-
             hidden_states = self.model(
                 input_ids=model_input.input_tokens,
                 positions=model_input.input_positions,
                 seq_ids=model_input.input_block_ids,
-                pixel_values=pixel_values,
-                aspect_ratios=aspect_ratios,
+                pixel_values=model_input.multi_modal_kwargs.get(
+                    'pixel_values'),
+                aspect_ratios=model_input.multi_modal_kwargs.get(
+                    'aspect_ratios'),
                 sampling_params=sampling_params,
-                num_chunks=num_chunks,
-                has_image=has_image,
+                num_chunks=model_input.multi_modal_kwargs.get('num_chunks'),
+                has_image=model_input.multi_modal_kwargs.get('has_image'),
             )
         else:
             empty_pixel_values = torch.zeros([1, 1, 4, 3, 560, 560],
@@ -138,3 +118,47 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
         )
 
         return [output]
+
+    def process_multi_modal_data_neuron(self, mm_data):
+        pixel_values_list = []
+        aspect_ratios_list = []
+        num_chunks_list = []
+        has_image_list = []
+        images = mm_data.get('image')
+
+        if isinstance(images, PILImage):
+            images = [images]
+        if isinstance(images, torch.Tensor):
+            images = [images]
+
+        for input_image in images:
+            if isinstance(input_image, PILImage):
+                pixel_values, aspect_ratios, num_chunks = \
+                    custom_image_preprocessing(self.model.config, \
+                                               [[input_image]])
+                has_image = torch.tensor([1])
+                image_tensors = [pixel_values.bfloat16().clone().detach(), \
+                                 aspect_ratios, num_chunks, has_image]
+            else:
+                empty_pixel_values = torch.zeros([1, 1, 4, 3, 560, 560], \
+                                                 dtype=torch.bfloat16)
+                empty_aspect_ratios = torch.ones([1, 1, 2], dtype=torch.int64)
+                # dummy num_chunks, will not be used
+                num_chunks = torch.tensor([[1]])
+                has_image = torch.tensor([0])
+                image_tensors = [empty_pixel_values, empty_aspect_ratios, \
+                                 num_chunks, has_image ]
+
+            pixel_values_list.append(image_tensors[0])
+            aspect_ratios_list.append(image_tensors[1])
+            num_chunks_list.append(image_tensors[2])
+            has_image_list.append(image_tensors[3])
+
+        mm_data["pixel_values"] = torch.cat(pixel_values_list,
+                                            dim=0).squeeze(0)
+        mm_data["aspect_ratios"] = torch.cat(aspect_ratios_list, dim=0)\
+            .squeeze(0)
+        mm_data["num_chunks"] = torch.cat(num_chunks_list, dim=0).squeeze(0)
+        mm_data["has_image"] = torch.cat(has_image_list, dim=0).squeeze(0)
+
+        return mm_data
