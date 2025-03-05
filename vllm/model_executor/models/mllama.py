@@ -55,7 +55,6 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import SequenceData
-from vllm.utils import is_list_of
 
 from .clip import CLIPMLP
 from .interfaces import SupportsMultiModal
@@ -124,8 +123,6 @@ def input_processor_for_mllama(
     if isinstance(image_data, Image.Image):
         image_data = [image_data]
 
-    assert is_list_of(image_data, Image.Image)
-
     num_image_tokens = dec_inputs['prompt_token_ids'].count(
         MLLAMA_IMAGE_TOKEN_ID)
     if num_image_tokens != len(image_data):
@@ -143,7 +140,7 @@ def input_processor_for_mllama(
     vision_config = hf_config.vision_config
 
     num_tiles = 0
-    for image in image_data[::-1]:
+    for image in image_data:
         width, height = image.size
         tile_size = vision_config.image_size
         canvas_height, canvas_width = get_optimal_tiled_canvas(
