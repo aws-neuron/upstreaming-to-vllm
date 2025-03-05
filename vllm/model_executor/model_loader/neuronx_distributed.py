@@ -442,12 +442,10 @@ class NeuronSpeculationCausalLM(nn.Module):
             draft_neuron_config.speculation_length = 0
         draft_neuron_config.trace_tokengen_model = True
         draft_neuron_config.enable_fused_speculation = False
-        if getattr(config.neuron_config,
-                   "draft_model_modules_to_not_convert",
+        if getattr(config.neuron_config, "draft_model_modules_to_not_convert",
                    None):
             draft_neuron_config.modules_to_not_convert = (
-                draft_neuron_config.draft_model_modules_to_not_convert
-            )
+                draft_neuron_config.draft_model_modules_to_not_convert)
         if config.neuron_config.enable_eagle_speculation:
             draft_neuron_config.is_eagle_draft = True
             draft_neuron_config.sequence_parallel_enabled = False
