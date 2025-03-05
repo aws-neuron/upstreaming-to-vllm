@@ -14,6 +14,7 @@ from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.platforms import current_platform
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
                            SequenceGroupMetadata, SequenceGroupMetadataDelta,
@@ -1364,8 +1365,6 @@ class Scheduler:
                         < seqs[0].data.get_len()):
                     do_sample = False
 
-            from vllm.worker.utils import use_neuronx_distributed
-
             # It assumes the scheduled_seq_groups is ordered by
             # prefill < decoding.
             if is_first_prefill or not self.scheduler_config.send_delta_data:
@@ -1392,7 +1391,7 @@ class Scheduler:
                     # for Neuron device
                     multi_modal_data=seq_group.multi_modal_data if
                     (scheduler_outputs.num_prefill_groups > 0
-                     or use_neuronx_distributed()) else None,
+                     or current_platform.is_neuron()) else None,
                     multi_modal_placeholders=seq_group.multi_modal_placeholders
                     if scheduler_outputs.num_prefill_groups > 0 else None,
                     mm_processor_kwargs=seq_group.mm_processor_kwargs,
