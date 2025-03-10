@@ -36,6 +36,7 @@ class ModelInputForNeuron(ModelRunnerInputBase):
     input_block_ids: Optional[torch.Tensor] = None
     sampling_metadata: SamplingMetadata = None
     multi_modal_kwargs: BatchedTensorInputs = None
+    adapter_ids: Optional[str] = None
 
     def as_broadcastable_tensor_dict(
             self) -> Dict[str, Union[int, torch.Tensor]]:
@@ -80,6 +81,8 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                            "The model will run without sliding window.")
         self.device_config = (self.device_config if self.device_config
                               is not None else DeviceConfig())
+
+        self.lora_config = vllm_config.lora_config
         self.device = self.device_config.device
         self.pin_memory = is_pin_memory_available()
 
@@ -388,6 +391,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                 positions=model_input.input_positions,
                 input_block_ids=model_input.input_block_ids,
                 sampling_params=sampling_params,
+                adapter_ids=model_input.adapter_ids,
                 **MultiModalKwargs.as_kwargs(model_input.multi_modal_kwargs
                                              or {},
                                              device=self.device),
