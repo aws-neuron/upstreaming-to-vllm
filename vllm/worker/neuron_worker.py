@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """A Neuron worker class."""
 import os
-from typing import List, Optional, Tuple
+from typing import List, Optional, Set, Tuple
 
 import torch.distributed
 
@@ -9,12 +9,13 @@ from vllm.config import VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.logger import init_logger
+from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.sequence import ExecuteModelRequest
 from vllm.worker.neuron_model_runner import NeuronModelRunner
-from vllm.worker.utils import NeuronFramework, get_neuron_framework_to_use
-from vllm.worker.worker_base import (LocalOrDistributedWorkerBase,
-                                     LoraNotSupportedWorkerBase, WorkerBase,
+from vllm.worker.utils import (NeuronFramework, get_neuron_framework_to_use,
+                               use_transformers_neuronx)
+from vllm.worker.worker_base import (LocalOrDistributedWorkerBase, WorkerBase,
                                      WorkerInput)
 
 logger = init_logger(__name__)
@@ -24,7 +25,7 @@ DEFAULT_NEURON_RANK_ID = "0"
 DEFAULT_ENABLE_NEURON_MULTI_NODE = "False"
 
 
-class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
+class NeuronWorker(LocalOrDistributedWorkerBase):
     """A worker class that executes the model on a group of neuron cores.
     """
 
@@ -41,6 +42,7 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         self.rank = rank
         self.distributed_init_method = distributed_init_method
         self.is_driver_worker = is_driver_worker
+        self.lora_config = vllm_config.lora_config
 
         self.enable_neuron_multi_node = (os.getenv(
             "ENABLE_NEURON_MULTI_NODE",
@@ -79,6 +81,9 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
                 "[transformers-neuronx, neuronx-distributed-inference]")
 
     def get_tnx_model_runner(self, vllm_config):
+        assert (self.lora_config
+                is None), ("LoRA is not supported for TransformersNeuronX "
+                           "framework.")
         from vllm.worker.multi_step_neuron_model_runner import (
             MultiStepNeuronModelRunner)
         if self.speculative_config is not None:
@@ -92,6 +97,8 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         from vllm.worker.neuronx_distributed_model_runner import (
             NeuronxDistributedModelRunner)
         if self.speculative_config is not None:
+            assert (self.lora_config
+                    is None), "LoRA is not supported for Speculative Decoding"
             return MultiStepNeuronxDistributedModelRunner(
                 vllm_config=vllm_config)
         else:
@@ -179,3 +186,31 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
             pipeline_model_parallel_size=1,
             backend="gloo",
         )
+
+    def add_lora(self, lora_request: LoRARequest) -> bool:
+        if use_transformers_neuronx():
+            raise NotImplementedError(
+                f"{type(self)} does not support LoRA with Neuron Framework "
+                f"Transformers NeuronX")
+        return self.model_runner.add_lora(lora_request)
+
+    def remove_lora(self, lora_id: int) -> bool:
+        if use_transformers_neuronx():
+            raise NotImplementedError(
+                f"{type(self)} does not support LoRA with Neuron Framework "
+                f"Transformers NeuronX")
+        return self.model_runner.remove_lora(lora_id)
+
+    def pin_lora(self, lora_id: int) -> bool:
+        if use_transformers_neuronx():
+            raise NotImplementedError(
+                f"{type(self)} does not support LoRA with Neuron Framework "
+                f"Transformers NeuronX")
+        return self.model_runner.pin_lora(lora_id)
+
+    def list_loras(self) -> Set[int]:
+        if use_transformers_neuronx():
+            raise NotImplementedError(
+                f"{type(self)} does not support LoRA with Neuron Framework "
+                f"Transformers NeuronX")
+        return self.model_runner.list_loras()

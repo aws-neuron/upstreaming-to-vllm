@@ -17,6 +17,7 @@ from vllm.config import (CacheConfig, CompilationConfig, ConfigFormat,
                          ParallelConfig, PoolerConfig, PromptAdapterConfig,
                          SchedulerConfig, SpeculativeConfig, TaskOption,
                          TokenizerPoolConfig, VllmConfig)
+from vllm.entrypoints.openai.serving_models import LoRAModulePath
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
@@ -153,6 +154,7 @@ class EngineArgs:
     long_lora_scaling_factors: Optional[Tuple[float]] = None
     lora_dtype: Optional[Union[str, torch.dtype]] = 'auto'
     max_cpu_loras: Optional[int] = None
+    lora_modules: Optional[LoRAModulePath] = None
     device: str = 'auto'
     num_scheduler_steps: int = 1
     multi_step_stream_outputs: bool = True
@@ -914,7 +916,7 @@ class EngineArgs:
         parser.add_argument(
             '--override-neuron-config',
             type=json.loads,
-            default=None,
+            default={},
             help="Override or set neuron device configuration. "
             "e.g. ``{\"cast_logits_dtype\": \"bloat16\"}``.")
         parser.add_argument(
@@ -1253,6 +1255,11 @@ class EngineArgs:
                 self.model_loader_extra_config = {}
             self.model_loader_extra_config[
                 "qlora_adapter_name_or_path"] = self.qlora_adapter_name_or_path
+
+        if self.lora_modules is not None:
+            if self.override_neuron_config is None:
+                self.override_neuron_config = {}
+            self.override_neuron_config["lora_modules"] = self.lora_modules
 
         load_config = self.create_load_config()
 
