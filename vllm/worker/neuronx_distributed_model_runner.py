@@ -296,7 +296,7 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
             "lora_modules parameter to the LLM Class"
             " or --lora-modules while using online server)")
 
-    def add_lora(self, lora_request: LoRARequest) -> bool:
+    def add_lora(self, lora_request: LoRARequest):
         logger.warning(
             "Adding LoRAs is only supported through the "
             "lora_modules parameter to the LLM Class"

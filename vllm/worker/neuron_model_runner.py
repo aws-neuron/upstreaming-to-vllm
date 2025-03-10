@@ -2,13 +2,15 @@
 
 import os
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Union
 
 import torch
 from torch import nn
 
 from vllm.config import DeviceConfig, VllmConfig
 from vllm.logger import init_logger
+from vllm.lora.layers import LoRAMapping
+from vllm.lora.request import LoRARequest
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader.neuron import get_neuron_model
@@ -430,3 +432,28 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
     def process_multi_modal_data_neuron(self, mm_data):
         # this is a no-op for NeuronModelRunner
         return mm_data
+
+    def remove_all_loras(self):
+        raise NotImplementedError(
+            "LoRAs are not supported for Transformers NeuronX framework")
+
+    def set_active_loras(self, lora_requests: Set[LoRARequest],
+                         lora_mapping: LoRAMapping) -> None:
+        raise NotImplementedError(
+            "LoRAs are not supported for Transformers NeuronX framework")
+
+    def add_lora(self, lora_request: LoRARequest):
+        raise NotImplementedError(
+            "LoRAs are not supported for Transformers NeuronX framework")
+
+    def remove_lora(self, lora_id: int) -> bool:
+        raise NotImplementedError(
+            "LoRAs are not supported for Transformers NeuronX framework")
+
+    def pin_lora(self, lora_id: int) -> bool:
+        raise NotImplementedError(
+            "LoRAs are not supported for Transformers NeuronX framework")
+
+    def list_loras(self) -> Set[int]:
+        raise NotImplementedError(
+            "LoRAs are not supported for Transformers NeuronX framework")
