@@ -20,10 +20,10 @@ from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader.neuronx_distributed import (
     _get_model_architecture, get_neuron_model)
+from vllm.multimodal import MultiModalKwargs
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
 from vllm.worker.neuron_model_runner import (ModelInputForNeuron,
                                              NeuronModelRunner)
-from vllm.worker.utils import use_transformers_neuronx
 
 logger = init_logger(__name__)
 
@@ -251,6 +251,14 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
                 sampling_params.top_p = top_p
                 sampling_params.temperature = temperature
 
+        # we need multi_modal_data for later tokens as well
+        multi_modal_inputs_list: List[MultiModalKwargs] = []
+        for seq_group_metadata in seq_group_metadata_list:
+            mm_data = seq_group_metadata.multi_modal_data
+            if mm_data:
+                multi_modal_inputs_list.append(mm_data)
+        multi_modal_kwargs = MultiModalKwargs.batch(multi_modal_inputs_list)
+
         lora_adapter_ids = self._get_lora_adapter_ids(seq_group_metadata_list)
 
         sampling_metadata = SamplingMetadata.prepare(
@@ -263,18 +271,6 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
             self.device,
             self.pin_memory,
             generators=self.get_generators(finished_requests_ids))
-
-        if use_transformers_neuronx(
-        ) and not self._on_device_sampling_disabled:
-            # Once the request IDs are changed in current iteration, we will
-            # update the on-device sampling parameters.
-            current_batch_request_ids = [
-                seq_group_meta_data.request_id
-                for seq_group_meta_data in seq_group_metadata_list
-            ]
-            if current_batch_request_ids != self._previous_batch_request_ids:
-                self._update_neuron_sampling_params(seq_group_metadata_list)
-                self._previous_batch_request_ids = current_batch_request_ids
 
         return ModelInputForNeuron(input_tokens=input_tokens,
                                    input_positions=input_positions,
