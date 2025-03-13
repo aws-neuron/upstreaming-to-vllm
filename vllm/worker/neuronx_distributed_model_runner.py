@@ -20,6 +20,7 @@ from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader.neuronx_distributed import (
     _get_model_architecture, get_neuron_model)
 from vllm.multimodal import MultiModalKwargs
+from vllm.multimodal import MultiModalKwargs
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
 from vllm.worker.neuron_model_runner import (ModelInputForNeuron,
                                              NeuronModelRunner)
