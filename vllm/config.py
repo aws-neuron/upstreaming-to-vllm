@@ -703,14 +703,16 @@ class ModelConfig:
         self,
         parallel_config: "ParallelConfig",
     ) -> None:
-        total_num_attention_heads = getattr(self.hf_text_config,
-                                            "num_attention_heads", 0)
-        tensor_parallel_size = parallel_config.tensor_parallel_size
-        if total_num_attention_heads % tensor_parallel_size != 0:
-            raise ValueError(
-                f"Total number of attention heads ({total_num_attention_heads})"
-                " must be divisible by tensor parallel size "
-                f"({tensor_parallel_size}).")
+        from vllm.platforms import current_platform
+        if not current_platform.is_neuron():
+            total_num_attention_heads = getattr(self.hf_text_config,
+                                                "num_attention_heads", 0)
+            tensor_parallel_size = parallel_config.tensor_parallel_size
+            if total_num_attention_heads % tensor_parallel_size != 0:
+                raise ValueError(f"Total number of attention heads "
+                                 f"({total_num_attention_heads})"
+                                 " must be divisible by tensor parallel size "
+                                 f"({tensor_parallel_size}).")
 
         pipeline_parallel_size = parallel_config.pipeline_parallel_size
         if pipeline_parallel_size > 1:
