@@ -3187,7 +3187,9 @@ class VllmConfig:
                         f"capability: {quant_config.get_min_capability()}. "
                         f"Current capability: {capability}.")
             supported_dtypes = quant_config.get_supported_act_dtypes()
-            if model_config.dtype not in supported_dtypes:
+            # Neuron implements custom handling logic for quantization support
+            if not current_platform.is_neuron() and \
+                model_config.dtype not in supported_dtypes:
                 raise ValueError(
                     f"{model_config.dtype} is not supported for quantization "
                     f"method {model_config.quantization}. Supported dtypes: "
