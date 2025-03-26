@@ -184,6 +184,7 @@ class NeuronCausalLM(nn.Module):
             for k, v in override_neuron_config.items():
                 setattr(self.model.config.neuron_config, k, v)
             self.model.load(compiled_model_path)
+            self.config.neuron_config = self.model.config.neuron_config
             logger.info(
                 "Successfully loaded precompiled model artifacts from %s",
                 compiled_model_path)
