@@ -382,6 +382,7 @@ class NeuronSpeculationCasualLM(nn.Module):
         except (FileNotFoundError, ValueError) as e:
             logger.warning(f"Exception: {e}")
             logger.warning(f"Failed to load the model from {compiled_model_path}, Recompiling...")
+        draft_checkpoint_download = True
         if draft_model_name_or_path == model_name_or_path:
             draft_checkpoint_download = False
         if not os.path.exists(model_name_or_path):
