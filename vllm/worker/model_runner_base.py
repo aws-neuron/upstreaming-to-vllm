@@ -186,6 +186,7 @@ class ModelRunnerBase(ABC, Generic[T]):
         self.speculative_config = vllm_config.speculative_config
         self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
+        self.kv_transfer_config = vllm_config.kv_transfer_config
 
     # Map of request_id -> generator used for seeded random sampling
     generators: Dict[str, torch.Generator] = {}

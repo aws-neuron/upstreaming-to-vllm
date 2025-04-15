@@ -41,8 +41,13 @@ class KVPipeBase(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def recv_tensor(self) -> Optional[torch.Tensor]:
+    def recv_tensor(self,
+                    is_signal_pipe: bool = False) -> Optional[torch.Tensor]:
         """Receive a tensor (can be None) from the pipeline.
+
+        Args:
+            is_signal_pipe (bool): Whether it is signal pipe (not data pipe).
+                                   Default false.
 
         Returns:
             Optional[torch.Tensor]: The tensor received from the pipeline. Can 

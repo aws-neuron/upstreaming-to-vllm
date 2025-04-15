@@ -4,11 +4,15 @@ from typing import List, Optional
 import torch
 
 from vllm.config import VllmConfig
+from vllm.distributed import get_kv_transfer_group
+from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.multimodal import MultiModalKwargs
 from vllm.sequence import IntermediateTensors
 from vllm.worker.neuronx_distributed_model_runner import (
     NeuronxDistributedModelRunner)
+
+logger = init_logger(__name__)
 
 
 class MultiStepNeuronxDistributedModelRunner(NeuronxDistributedModelRunner):
@@ -44,14 +48,48 @@ class MultiStepNeuronxDistributedModelRunner(NeuronxDistributedModelRunner):
             seq_group.sampling_params.temperature,
         ] for seq_group in model_input.sampling_metadata.seq_groups])
 
-        logits = self.model(
-            input_ids=model_input.input_tokens,
-            positions=model_input.input_positions,
-            input_block_ids=model_input.input_block_ids,
-            sampling_params=sampling_params,
-            **MultiModalKwargs.as_kwargs(model_input.multi_modal_kwargs or {},
-                                         device=self.device),
-        )
+        model_executable = self.model
+        bypass_model_exec = False
+        kv_caches = []
+        if self.need_recv_kv(model_input, kv_caches):
+            logger.debug("Waiting to receive tensors.")
+            logits, bypass_model_exec, model_input = \
+                get_kv_transfer_group().connector.recv_kv_caches_and_hidden_states_from_local_buffer(
+                    # model is used to know which layer the current worker
+                    # is working on, so that we can receive KV for only those
+                    # layers.
+                    model_executable,
+                    model_input,
+                    kv_caches=kv_caches,
+                )
+        logger.debug("bypass_model_exec: %s", bypass_model_exec)
+        if not bypass_model_exec:
+            logger.debug(
+                "Chose to not bypass execution. Running normal inference.")
+            logits = self.model(
+                input_ids=model_input.input_tokens,
+                positions=model_input.input_positions,
+                input_block_ids=model_input.input_block_ids,
+                sampling_params=sampling_params,
+                **MultiModalKwargs.as_kwargs(model_input.multi_modal_kwargs
+                                             or {},
+                                             device=self.device),
+            )
+        if self.need_send_kv(model_input, kv_caches):
+            logger.debug(
+                "Sending KV cache, model output, and hidden_states (if EAGLE)."
+            )
+            kv_caches = model_executable.get_kv_cache()
+
+            get_kv_transfer_group().send_kv_caches_and_hidden_states(
+                # model_executable is used to know which layer the current
+                # worker is working on, so that we can send KV for only those
+                # layers.
+                model_executable,
+                model_input,
+                kv_caches,
+                logits,
+            )
 
         output = self.model.sample(
             logits=logits,

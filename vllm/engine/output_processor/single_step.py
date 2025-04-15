@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import os
 from typing import List
 
 from vllm.config import SchedulerConfig
@@ -131,6 +132,7 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
             sampling_params,
             lora_req=seq_group.lora_request,
         )
-        if seq.is_finished():
+        if (os.environ.get("ASYNC_DI_PRODUCER", None) != "1"
+                and seq.is_finished()):
             for scheduler in self.scheduler:
                 scheduler.free_seq(seq)

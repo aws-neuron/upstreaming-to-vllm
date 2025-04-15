@@ -8,6 +8,7 @@ import torch
 from torch import nn
 
 from vllm.config import DeviceConfig, VllmConfig
+from vllm.distributed import get_kv_transfer_group
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
@@ -388,16 +389,51 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         ] for seq_group in model_input.sampling_metadata.seq_groups]))
 
         if use_neuronx_distributed():
-            hidden_states = self.model(
-                input_ids=model_input.input_tokens,
-                positions=model_input.input_positions,
-                input_block_ids=model_input.input_block_ids,
-                sampling_params=sampling_params,
-                adapter_ids=model_input.adapter_ids,
-                **MultiModalKwargs.as_kwargs(model_input.multi_modal_kwargs
-                                             or {},
-                                             device=self.device),
-            )
+
+            model_executable = self.model
+
+            bypass_model_exec = False
+            if self.need_recv_kv(model_input, kv_caches=[]):
+                logger.debug("waiting for tensors to be sent")
+
+                hidden_states, bypass_model_exec, model_input = \
+                get_kv_transfer_group().connector\
+                .recv_kv_caches_and_hidden_states_from_local_buffer(
+                    model_executable, model_input, kv_caches=[])
+
+                assert bypass_model_exec, (
+                    "bypass_model_exec is not True "
+                    "for decode worker when processing prompt")
+            logger.debug("bypass_model_exec: %s", bypass_model_exec)
+            if not bypass_model_exec:
+                hidden_states = self.model(
+                    input_ids=model_input.input_tokens,
+                    positions=model_input.input_positions,
+                    input_block_ids=model_input.input_block_ids,
+                    sampling_params=sampling_params,
+                    adapter_ids=model_input.adapter_ids,
+                    **MultiModalKwargs.as_kwargs(model_input.multi_modal_kwargs
+                                                 or {},
+                                                 device=self.device),
+                )
+
+            # Sending KV cache in distributed KV cache transfer setting
+
+            # NOTE: the send operation is non-blocking
+            if self.need_send_kv(model_input, kv_caches=[]):
+                logger.debug("Sending KV cache")
+
+                kv_caches = model_executable.get_kv_cache()
+                get_kv_transfer_group().send_kv_caches_and_hidden_states(
+                    # model_executable is used to know which layer the current
+                    # worker is working on, so that we can send KV for only
+                    # those layers.
+                    model_executable,
+                    model_input,
+                    kv_caches,
+                    hidden_states,
+                )
+
         elif use_transformers_neuronx():
             # [TODO] validate on-device sampling
             # The model signature may need change for on-device sampling
@@ -432,6 +468,50 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
     def process_multi_modal_data_neuron(self, mm_data):
         # this is a no-op for NeuronModelRunner
         return mm_data
+
+    def need_recv_kv(self, model_input, kv_caches) -> bool:
+        """Check if we need to receive kv-cache from the other worker.
+        We need to receive KV when
+            1. current vLLM instance is KV cache consumer/decode vLLM instance
+            2. this batch is not a profiling run
+            3. this batch is a prefill run
+
+        Args:
+            model_input: input to the model executable
+            kv_caches: vLLM's paged memory
+        """
+
+        if self.kv_transfer_config is None:
+            return False
+
+        is_profile_run = False
+
+        is_prefill_run = (model_input.input_positions[:, 0]).sum().item() == 0
+
+        return self.kv_transfer_config.is_kv_consumer and (
+            not is_profile_run) and is_prefill_run
+
+    def need_send_kv(self, model_input, kv_caches) -> bool:
+        """Check if we need to send kv-cache to the other worker.
+        We need to send KV when
+            1. current vLLM instance is KV cache producer/prefill vLLM instance
+            2. this batch is not a profiling run
+            3. this batch is a prefill run
+
+        Args:
+            model_input: input to the model executable
+            kv_caches: vLLM's paged memory
+        """
+
+        if self.kv_transfer_config is None:
+            return False
+
+        is_profile_run = False
+
+        is_prefill_run = (model_input.input_positions[:, 0]).sum().item() == 0
+
+        return self.kv_transfer_config.is_kv_producer and (
+            not is_profile_run) and is_prefill_run
 
     def remove_all_loras(self):
         raise NotImplementedError(

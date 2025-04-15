@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Utilities for selecting and loading Neuron models in
 neuronx-distributed-inference framework."""
+import collections
 # Disabling yapf because yapf and isort have conflicts for the below imports
 # yapf: disable
 import copy
@@ -9,7 +10,7 @@ import importlib
 import multiprocessing
 import os
 import shutil
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -81,6 +82,27 @@ class NeuronCausalLM(nn.Module):
 
         # Lazy initialized
         self.model: nn.Module
+        self.kv_caches: Optional[List[Any]] = None
+
+    # TODO move to NXDI
+    def get_kv_cache(self):
+        if self.kv_caches is None:
+
+            kv_caches = []
+            tp_tensors_map = collections.defaultdict(list)
+            state = self.model.context_encoding_model.model.nxd_model.state
+
+            # rearrange tensors with tp
+            for tp_idx, per_tp_state in enumerate(state):
+                for key, val in per_tp_state.items():
+                    tp_tensors_map[tp_idx].append(val)
+
+            for i in range(len(tp_tensors_map[0])):
+                for tp, tensors in tp_tensors_map.items():
+                    kv_caches.append(tensors[i])
+            self.kv_caches = kv_caches
+
+        return self.kv_caches
 
     def forward(self,
                 input_ids: torch.Tensor,
@@ -185,6 +207,7 @@ class NeuronCausalLM(nn.Module):
                 for k, v in override_neuron_config.items():
                     setattr(self.model.config.neuron_config, k, v)
             self.model.load(compiled_model_path)
+            self.get_kv_cache()
             self.config.neuron_config = self.model.config.neuron_config
             logger.info(
                 "Successfully loaded precompiled model artifacts from %s",
@@ -202,6 +225,7 @@ class NeuronCausalLM(nn.Module):
         self.model = neuronx_model_cls(model_name_or_path, config)
         self.model.compile(compiled_model_path)
         self.model.load(compiled_model_path)
+        self.get_kv_cache()
 
 
 class NeuronMllamaForCausalLM(nn.Module):
@@ -358,6 +382,8 @@ class NeuronSpeculationCausalLM(nn.Module):
         # Lazy initialized
         self.model: nn.Module
 
+        self.kv_caches: Optional[List[Any]] = None
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -496,6 +522,7 @@ class NeuronSpeculationCausalLM(nn.Module):
                 for k, v in override_neuron_config.items():
                     setattr(self.model.config.neuron_config, k, v)
             self.model.load(compiled_model_path)
+            self.get_kv_cache()
             logger.info(
                 "Successfully loaded precompiled model artifacts from %s",
                 compiled_model_path)
@@ -523,6 +550,26 @@ class NeuronSpeculationCausalLM(nn.Module):
         self.model = neuronx_model_cls(model_name_or_path, config)
         self.model.compile(compiled_model_path)
         self.model.load(compiled_model_path)
+        self.get_kv_cache()
+
+    # TODO move to NXDI
+    def get_kv_cache(self):
+        if self.kv_caches is None:
+            kv_caches = []
+            tp_tensors_map = collections.defaultdict(list)
+            state = self.model.context_encoding_model.model.nxd_model.state
+
+            # rearrange tensors with tp
+            for tp_idx, per_tp_state in enumerate(state):
+                for key, val in per_tp_state.items():
+                    tp_tensors_map[tp_idx].append(val)
+
+            for i in range(len(tp_tensors_map[0])):
+                for tp, tensors in tp_tensors_map.items():
+                    kv_caches.append(tensors[i])
+            self.kv_caches = kv_caches
+
+        return self.kv_caches
 
 
 def _get_model_architecture(config: PretrainedConfig) -> str:
@@ -609,9 +656,12 @@ def get_neuron_model(model_config: ModelConfig,
         default_neuron_config_args, model_config.override_neuron_config)
 
     override_neuron_config = model_config.override_neuron_config
+    if override_neuron_config is None:
+        override_neuron_config = {}
     model.load_weights(model_config.model,
                        neuron_config=neuron_config,
                        override_neuron_config=override_neuron_config)
+    logger.info("model loaded")
     return model.eval()
 
 
@@ -630,8 +680,11 @@ def get_neuron_speculation_model(model_config: ModelConfig,
         default_neuron_config_args, model_config.override_neuron_config)
 
     override_neuron_config = model_config.override_neuron_config
+    if override_neuron_config is None:
+        override_neuron_config = {}
     model.load_weights(model_config.model,
                        speculation_config.draft_model_config.model,
                        neuron_config=neuron_config,
                        override_neuron_config=override_neuron_config)
+    logger.info("spec model loaded")
     return model.eval()
