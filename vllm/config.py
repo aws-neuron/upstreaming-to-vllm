@@ -3651,6 +3651,9 @@ class KVTransferConfig:
     """The Python module path to dynamically load the KV connector from.
     Only supported in V1."""
 
+    wait_timeout_minutes: int = 1440
+    """Wait time for signal pipe for waiting requests to avoid server timeout"""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
