@@ -1,21 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-    This module implements a PyNccl pipe for sending and receiving
-    Optional[torch.Tensor] between distributed ranks with advanced
-    communication features.
-
-    Key Features:
-    - Supports sending and receiving tensors with metadata
-    - Handles both CUDA and CPU device communications
-    - Implements a non-blocking tensor transfer mechanism
-    - Manages buffer size and provides backpressure control
-    - Supports distributed process groups with configurable parameters
+    KVPipe for sending/receiving tensors for Neuron.
 """
 
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import Callable, Optional
+from typing import Callable, Dict, Optional, Tuple
 
 import torch
 
@@ -35,10 +26,10 @@ class BrokenPipeException(Exception):
         super().__init__(self.message)
 
 
-Metadata = dict[str, Optional[torch.Tensor]]
+Metadata = Dict[str, Optional[torch.Tensor]]
 
 
-class PyNcclPipe(KVPipeBase):
+class NeuronPipe(KVPipeBase):
 
     METADATA_LENGTH = 16
     MAX_TENSOR_DIMENSIONS = 14
@@ -59,13 +50,11 @@ class PyNcclPipe(KVPipeBase):
             self.device = self._select_device(device)
 
         # build distributed connection and send/recv implementation
-        store_timeout = self.config.get_from_extra_config("store_timeout", 300)
         self.group = StatelessProcessGroup.create(
             host=self.config.kv_ip,
             port=self.config.kv_port + port_offset,
             rank=self.kv_rank,
             world_size=self.kv_parallel_size,
-            store_timeout=store_timeout,
         )
         # add a barrier to make sure the connection is initiated properly
         self.group.barrier()
@@ -83,7 +72,7 @@ class PyNcclPipe(KVPipeBase):
 
     def _get_device_send_recv_impl(
         self, group: StatelessProcessGroup
-    ) -> tuple[Callable[[torch.Tensor, int], None], Callable[
+    ) -> Tuple[Callable[[torch.Tensor, int], None], Callable[
         [torch.Tensor, int], None]]:
 
         send: Callable[[torch.Tensor, int], None]
@@ -118,11 +107,11 @@ class PyNcclPipe(KVPipeBase):
         """
         Create the metadata as a dictionary based on the input tensor.
 
-        Args:
-            tensor: The input tensor or None if no tensor is provided.
+        Parameters:
+            - tensor: The input tensor or None if no tensor is provided.
 
         Returns:
-            metadata: A dictionary with the following keys:
+            - metadata: A dictionary with the following keys:
                 - "dtype": The data type of the tensor or None.
                 - "shape": The shape of the tensor or None.
         """
@@ -135,13 +124,13 @@ class PyNcclPipe(KVPipeBase):
         """
         Create a buffer to receive the tensor based on the provided metadata.
 
-        Args:
-            metadata: A dictionary with keys "dtype" and "shape",
-                describing the tensor's data type and shape.
+        Parameters:
+            - metadata: A dictionary with keys "dtype" and "shape", describing 
+              the tensor's data type and shape.
 
         Returns:
-            buffer: A tensor of the specified type and shape,
-                allocated on `self.device`.
+            - buffer: A tensor of the specified type and shape, allocated on 
+              self.device.
         """
         return torch.empty(metadata["shape"],
                            dtype=metadata["dtype"],
@@ -151,29 +140,34 @@ class PyNcclPipe(KVPipeBase):
         """
         Send the metadata dictionary to the target rank.
 
-        Args:
-            metadata: A dictionary with keys "dtype" and "shape".
+        Parameters:
+            - metadata: A dictionary with keys "dtype" and "shape".
         """
         self.group.send_obj(metadata, self.target_rank_for_send)
 
-    def _recv_metadata(self) -> Metadata:
+    def _recv_metadata(self,
+                       wait_timeout_minutes: Optional[int] = None) -> Metadata:
         """
         Receive the metadata dictionary from the target rank.
 
+        Args:
+            - wait_timeout_minutes: wait timeout for requests
+
         Returns:
-            metadata: A dictionary with keys "dtype" and "shape"
-                describing the tensor.
+            - metadata: A dictionary with keys "dtype" and "shape" describing 
+              the tensor.
         """
-        return self.group.recv_obj(self.target_rank_for_recv)
+        return self.group.recv_obj(self.target_rank_for_recv,
+                                   wait_timeout_minutes)
 
     def _send_impl(self, tensor: Optional[torch.Tensor]) -> None:
         """
-        The actual implementation of sending the tensor and its metadata to the
+        The actual implementation of sending the tensor and its metadata to the 
         target rank.
 
-        Args:
-            tensor: The input tensor to be sent, or `None` if no tensor is
-                being sent.
+        Parameters:
+            - tensor: The input tensor to be sent, or None if no tensor is 
+              being sent.
         """
         metadata = self._make_metadata(tensor)
         self._send_metadata(metadata)
@@ -181,15 +175,21 @@ class PyNcclPipe(KVPipeBase):
             self.device_send_func(tensor.to(self.device),
                                   self.target_rank_for_send)
 
-    def _recv_impl(self) -> Optional[torch.Tensor]:
+    def _recv_impl(
+            self,
+            wait_timeout_minutes: Optional[int] = None
+    ) -> Optional[torch.Tensor]:
         """
-        The actual implementation of receiving a tensor and its metadata from
+        The actual implementation of receiving a tensor and its metadata from 
         the target rank.
 
+        Args:
+            - wait_timeout_minutes: wait timeout for requests
+
         Returns:
-            buffer: The received tensor, or `None` if no tensor is received.
+            - buffer: The received tensor, or None if no tensor is received.
         """
-        metadata = self._recv_metadata()
+        metadata = self._recv_metadata(wait_timeout_minutes)
         if metadata["dtype"] is None:
             return None
         buffer = self._prepare_recv_buffer(metadata)
@@ -215,7 +215,7 @@ class PyNcclPipe(KVPipeBase):
 
     def block_if_full(self):
         """
-        Block the current thread if the buffer size is larger than the
+        Block the current thread if the buffer size is larger than the 
         threshold.
         """
         while self.buffer_size > self.buffer_size_thresh:
@@ -224,11 +224,11 @@ class PyNcclPipe(KVPipeBase):
 
     def send_tensor(self, tensor: Optional[torch.Tensor]) -> None:
         """
-        Sends a tensor and its metadata to the destination rank in a
+        Sends a tensor and its metadata to the destination rank in a 
         non-blocking way.
 
-        Args:
-            tensor: The tensor to send, or `None` if no tensor is being sent.
+        Parameters:
+            - tensor: The tensor to send, or None if no tensor is being sent.
         """
         if self.transport_thread is None:
             self.transport_thread = ThreadPoolExecutor(max_workers=1)
@@ -253,16 +253,23 @@ class PyNcclPipe(KVPipeBase):
 
         Args:
             is_signal_pipe (bool): Whether it is signal pipe (not data pipe).
-                                   Default false. Not used in this 
-                                   implementation.
-        
+                                   Default false.
+
         Returns:
             - tensor: The received tensor, or None if no tensor is received.
         """
         if self.transport_thread is None:
             self.transport_thread = ThreadPoolExecutor(max_workers=1)
 
-        future = self.transport_thread.submit(self._recv_impl)
+        wait_timeout_minutes = None
+        # the wait_time_minutes is only effective on signal pipe for waiting
+        # requests. Once signal pipe connects, for data pipe, we want to have
+        # the original timeout in TCPStore to error out data transfer stalls.
+        if is_signal_pipe:
+            wait_timeout_minutes = self.config.wait_timeout_minutes
+
+        future = self.transport_thread.submit(self._recv_impl,
+                                              wait_timeout_minutes)
 
         try:
             tensor = future.result()

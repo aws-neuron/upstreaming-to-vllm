@@ -7,6 +7,7 @@ from typing import List, Optional, Set, Tuple
 import torch.distributed
 
 from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.logger import init_logger
@@ -160,18 +161,41 @@ class NeuronWorker(LocalOrDistributedWorkerBase):
 
         vLLM still needs the environment initialized when TP/PP > 1
         """
-        init_distributed_environment(
-            world_size=1,
-            rank=self.rank,
-            local_rank=self.local_rank,
-            distributed_init_method=self.distributed_init_method,
-            backend="gloo",
-        )
+        if self.kv_transfer_config:
 
-        ensure_model_parallel_initialized(
-            1,
-            1,
-        )
+            logger.info("trying to initialize distributed env")
+            init_distributed_environment(
+                world_size=self.kv_transfer_config.kv_parallel_size,
+                rank=self.kv_transfer_config.kv_rank,
+                local_rank=0,
+                distributed_init_method=(
+                    f"tcp://{self.kv_transfer_config.kv_ip}:"
+                    f"{os.environ.get('VLLM_KV_TRANSFER_PORT', '8989')}"),
+                backend="gloo",
+            )
+
+            logger.info("initialized distributed env")
+            ensure_model_parallel_initialized(
+                tensor_model_parallel_size=self.kv_transfer_config.
+                kv_parallel_size,
+                # pipeline parallelism is not yet supported
+                pipeline_model_parallel_size=1,
+                backend="gloo",
+            )
+            ensure_kv_transfer_initialized(self.vllm_config)
+            logger.info("initialized kv connector")
+        else:
+            init_distributed_environment(
+                world_size=1,
+                rank=self.rank,
+                local_rank=self.local_rank,
+                distributed_init_method=self.distributed_init_method,
+                backend="gloo",
+            )
+            ensure_model_parallel_initialized(
+                1,
+                1,
+            )
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         if current_platform.use_transformers_neuronx():
