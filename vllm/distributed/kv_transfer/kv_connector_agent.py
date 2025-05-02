@@ -24,7 +24,7 @@ logger = init_logger(__name__)
 class KVTransferAgent:
     """
     A class designated for distributed KV transfer
-    
+
     Target use cases:
         1. Disaggregated prefill
         2. Remote KV cache storage
@@ -74,3 +74,10 @@ class KVTransferAgent:
 
         return self.connector.recv_kv_caches_and_hidden_states(
             model_executable, model_input, kv_caches)
+
+    # ========= NeuroConnector specific ==============
+    def async_recv_kv_caches(self, request_id, block_ids):
+        return self.connector.async_recv_kv_caches(request_id, block_ids)
+
+    def check_transfer_done(self, request_id, remove=False):
+        return self.connector.check_transfer_done(request_id, remove=remove)

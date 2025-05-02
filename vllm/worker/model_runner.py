@@ -1220,6 +1220,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
                 backend=backend)
 
+        get_kv_transfer_group().connector.register_kv_caches(
+            self.model.get_kv_caches())
+
     def get_model(self) -> nn.Module:
         return self.model
 

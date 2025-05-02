@@ -35,6 +35,7 @@ class ModelInputForNeuron(ModelRunnerInputBase):
     """
     Used by the NeuronModelRunner.
     """
+    request_ids: Optional[List[str]] = None
     input_tokens: Optional[torch.Tensor] = None
     input_positions: Optional[torch.Tensor] = None
     input_block_ids: Optional[torch.Tensor] = None
@@ -49,6 +50,7 @@ class ModelInputForNeuron(ModelRunnerInputBase):
     def as_broadcastable_tensor_dict(
             self) -> Dict[str, Union[int, torch.Tensor]]:
         return {
+            "request_ids": self.request_ids,
             "input_tokens": self.input_tokens,
             "input_positions": self.input_positions,
             "input_block_ids": self.input_block_ids,
@@ -67,6 +69,7 @@ class ModelInputForNeuron(ModelRunnerInputBase):
         attn_backend: Optional["AttentionBackend"] = None,
     ) -> "ModelInputForNeuron":
         return ModelInputForNeuron(
+            request_ids=tensor_dict["request_ids"],
             input_tokens=tensor_dict["input_tokens"],
             input_positions=tensor_dict["input_positions"],
             input_block_ids=tensor_dict["input_block_ids"],
@@ -173,6 +176,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                torch.Tensor, torch.Tensor, torch.Tensor, List[int],
                BatchedTensorInputs]:
         assert len(seq_group_metadata_list) > 0
+        request_ids: List[str] = []
         input_tokens: List[List[int]] = []
         input_positions: List[List[int]] = []
         input_block_ids: List[int] = []
@@ -185,6 +189,8 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         seq_lens: List[int] = []
         multi_modal_kwargs_list: List[MultiModalKwargs] = []
         for seq_group_metadata in seq_group_metadata_list:
+
+            request_ids.append(seq_group_metadata.request_id)
             assert seq_group_metadata.is_prompt
             seq_ids = list(seq_group_metadata.seq_data.keys())
             assert len(seq_ids) == 1
@@ -299,6 +305,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
                torch.Tensor, torch.Tensor, torch.Tensor]:
         assert len(seq_group_metadata_list) > 0
+        request_ids: List[str] = []
         input_tokens: List[List[int]] = []
         input_positions: List[List[int]] = []
         input_block_ids: List[int] = []
@@ -315,6 +322,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             assert len(seq_ids) == 1
             req_id = seq_group_metadata.request_id
             for seq_id in seq_ids:
+                request_ids.append(seq_group_metadata.request_id)
                 seq_data = seq_group_metadata.seq_data[seq_id]
                 generation_token = seq_data.get_last_token_id()
                 input_tokens.append([generation_token])
@@ -473,7 +481,8 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                 self._update_neuron_sampling_params(seq_group_metadata_list)
                 self._previous_batch_request_ids = current_batch_request_ids
 
-        return ModelInputForNeuron(input_tokens=input_tokens,
+        return ModelInputForNeuron(request_ids=request_ids,
+                                   input_tokens=input_tokens,
                                    input_positions=input_positions,
                                    input_block_ids=input_block_ids,
                                    slot_mapping=slot_mapping,
@@ -561,18 +570,25 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             model_executable = self.model
 
             bypass_model_exec = False
-            if self.need_recv_kv(model_input, kv_caches=[]):
-                logger.debug("waiting for tensors to be sent")
-
-                hidden_states, bypass_model_exec, model_input = \
-                get_kv_transfer_group().connector\
-                .recv_kv_caches_and_hidden_states_from_local_buffer(
-                    model_executable, model_input, kv_caches=[])
+            if self.need_recv_kv(model_input):
+                # It doesn't trigger KV cache transfer here which
+                # could block decode, transfer was trigger during scheduler
+                # and completed at this point, so here we directly
+                # get hidden_states (output tokens with on-device sampling)
+                # from connector
+                hidden_states = get_kv_transfer_group(
+                ).recv_kv_caches_and_hidden_states(
+                    None,
+                    model_input,
+                    None,
+                )
 
                 assert bypass_model_exec, (
                     "bypass_model_exec is not True "
                     "for decode worker when processing prompt")
+
             logger.debug("bypass_model_exec: %s", bypass_model_exec)
+
             if not bypass_model_exec:
                 hidden_states = self.model(
                     input_ids=model_input.input_tokens,
@@ -590,22 +606,11 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                         device=self.device),
                 )
 
-            # Sending KV cache in distributed KV cache transfer setting
-
-            # NOTE: the send operation is non-blocking
-            if self.need_send_kv(model_input, kv_caches=[]):
+            if self.need_send_kv(model_input):
                 logger.debug("Sending KV cache")
 
-                kv_caches = model_executable.get_kv_cache()
-                get_kv_transfer_group().send_kv_caches_and_hidden_states(
-                    # model_executable is used to know which layer the current
-                    # worker is working on, so that we can send KV for only
-                    # those layers.
-                    model_executable,
-                    model_input,
-                    kv_caches,
-                    hidden_states,
-                )
+                get_kv_transfer_group().async_send_kv_caches(
+                    None, model_input, None, hidden_states)
 
         elif current_platform.use_transformers_neuronx():
             # [TODO] validate on-device sampling
@@ -644,49 +649,23 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         # this is a no-op for NeuronModelRunner
         return mm_data
 
-    def need_recv_kv(self, model_input, kv_caches) -> bool:
-        """Check if we need to receive kv-cache from the other worker.
-        We need to receive KV when
-            1. current vLLM instance is KV cache consumer/decode vLLM instance
-            2. this batch is not a profiling run
-            3. this batch is a prefill run
-
-        Args:
-            model_input: input to the model executable
-            kv_caches: vLLM's paged memory
-        """
-
-        if self.kv_transfer_config is None:
+    def need_recv_kv(self, model_input) -> bool:
+        if self.vllm_config.kv_transfer_config is None:
             return False
-
-        is_profile_run = False
 
         is_prefill_run = (model_input.input_positions[:, 0]).sum().item() == 0
 
-        return self.kv_transfer_config.is_kv_consumer and (
-            not is_profile_run) and is_prefill_run
+        return self.vllm_config.kv_transfer_config.is_kv_consumer \
+            and is_prefill_run
 
-    def need_send_kv(self, model_input, kv_caches) -> bool:
-        """Check if we need to send kv-cache to the other worker.
-        We need to send KV when
-            1. current vLLM instance is KV cache producer/prefill vLLM instance
-            2. this batch is not a profiling run
-            3. this batch is a prefill run
-
-        Args:
-            model_input: input to the model executable
-            kv_caches: vLLM's paged memory
-        """
-
-        if self.kv_transfer_config is None:
+    def need_send_kv(self, model_input) -> bool:
+        if self.vllm_config.kv_transfer_config is None:
             return False
-
-        is_profile_run = False
 
         is_prefill_run = (model_input.input_positions[:, 0]).sum().item() == 0
 
-        return self.kv_transfer_config.is_kv_producer and (
-            not is_profile_run) and is_prefill_run
+        return self.vllm_config.kv_transfer_config.is_kv_producer \
+            and is_prefill_run
 
     def remove_all_loras(self):
         raise NotImplementedError(

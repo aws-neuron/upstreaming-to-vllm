@@ -7,7 +7,8 @@ from typing import List, Optional, Set, Tuple
 import torch.distributed
 
 from vllm.config import VllmConfig
-from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
+from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
+                                          get_kv_transfer_group)
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.logger import init_logger
@@ -94,6 +95,10 @@ class NeuronWorker(LocalOrDistributedWorkerBase):
     def load_model(self):
         self.model_runner.load_model()
 
+        if self.vllm_config.kv_transfer_config:
+            get_kv_transfer_group().register_kv_caches(
+                self.model_runner.get_model().get_kv_caches())
+
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Determine the number of available KV blocks.
 
@@ -161,28 +166,10 @@ class NeuronWorker(LocalOrDistributedWorkerBase):
 
         vLLM still needs the environment initialized when TP/PP > 1
         """
-        if self.kv_transfer_config:
+        if self.vllm_config.kv_transfer_config:
 
-            logger.info("trying to initialize distributed env")
-            init_distributed_environment(
-                world_size=self.kv_transfer_config.kv_parallel_size,
-                rank=self.kv_transfer_config.kv_rank,
-                local_rank=0,
-                distributed_init_method=(
-                    f"tcp://{self.kv_transfer_config.kv_ip}:"
-                    f"{os.environ.get('VLLM_KV_TRANSFER_PORT', '8989')}"),
-                backend="gloo",
-            )
-
-            logger.info("initialized distributed env")
-            ensure_model_parallel_initialized(
-                tensor_model_parallel_size=self.kv_transfer_config.
-                kv_parallel_size,
-                # pipeline parallelism is not yet supported
-                pipeline_model_parallel_size=1,
-                backend="gloo",
-            )
             ensure_kv_transfer_initialized(self.vllm_config)
+            get_kv_transfer_group().initialize_buffer()
             logger.info("initialized kv connector")
         else:
             init_distributed_environment(

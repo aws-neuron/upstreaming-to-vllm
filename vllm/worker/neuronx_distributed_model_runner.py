@@ -265,7 +265,8 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
             self.pin_memory,
             generators=self.get_generators(finished_requests_ids))
 
-        return ModelInputForNeuron(input_tokens=input_tokens,
+        return ModelInputForNeuron(request_ids=request_ids,
+                                   input_tokens=input_tokens,
                                    input_positions=input_positions,
                                    input_block_ids=input_block_ids,
                                    slot_mapping=slot_mapping,
