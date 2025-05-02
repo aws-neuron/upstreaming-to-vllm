@@ -68,24 +68,25 @@ _NEURON_SUPPORTED_MODELS: Dict[str, Tuple[str, str]] = {
 }
 
 
-class NeuronCausalLM(nn.Module):
+class NeuronBase(nn.Module):
 
-    def __init__(
-        self,
-        config: PretrainedConfig,
-    ) -> None:
+    def __init__(self,
+                 config: PretrainedConfig,
+                 on_device_sampling_disabled: bool = False) -> None:
         super().__init__()
         self.config = config
-        self.logits_processor = LogitsProcessor(config.vocab_size,
-                                                logits_as_input=True)
-        self.sampler = Sampler()
+        self.logits_processor = LogitsProcessor(
+            config.get_text_config().vocab_size, logits_as_input=True)
+        self.on_device_sampling_disabled = on_device_sampling_disabled
+        if self.on_device_sampling_disabled:
+            # Use default sampler
+            self.sampler = Sampler()
 
         # Lazy initialized
         self.model: nn.Module
         self.kv_caches: Optional[List[Any]] = None
 
-    # TODO move to NXDI
-    def get_kv_cache(self):
+    def get_kv_caches(self):
         if self.kv_caches is None:
 
             kv_caches = []
@@ -103,6 +104,9 @@ class NeuronCausalLM(nn.Module):
             self.kv_caches = kv_caches
 
         return self.kv_caches
+
+
+class NeuronCausalLM(NeuronBase):
 
     def forward(self,
                 input_ids: torch.Tensor,
@@ -207,7 +211,6 @@ class NeuronCausalLM(nn.Module):
                 for k, v in override_neuron_config.items():
                     setattr(self.model.config.neuron_config, k, v)
             self.model.load(compiled_model_path)
-            self.get_kv_cache()
             self.config.neuron_config = self.model.config.neuron_config
             logger.info(
                 "Successfully loaded precompiled model artifacts from %s",
@@ -225,26 +228,9 @@ class NeuronCausalLM(nn.Module):
         self.model = neuronx_model_cls(model_name_or_path, config)
         self.model.compile(compiled_model_path)
         self.model.load(compiled_model_path)
-        self.get_kv_cache()
 
 
-class NeuronMllamaForCausalLM(nn.Module):
-
-    def __init__(self,
-                 config: PretrainedConfig,
-                 on_device_sampling_disabled: bool = False) -> None:
-        super().__init__()
-        self.config = config
-        self.logits_processor = LogitsProcessor(
-            config.get_text_config().vocab_size, logits_as_input=True)
-
-        self.on_device_sampling_disabled = on_device_sampling_disabled
-        if self.on_device_sampling_disabled:
-            # Use default sampler
-            self.sampler = Sampler()
-
-        # Lazy initialized
-        self.model: nn.Module
+class NeuronMllamaForCausalLM(NeuronBase):
 
     def forward(self, input_ids: torch.Tensor, positions: torch.Tensor,
                 seq_ids: torch.Tensor, pixel_values: torch.Tensor,
@@ -368,21 +354,8 @@ def compile_model(neuron_model, traced_model_path):
     neuron_model.model.compile(traced_model_path)
 
 
-class NeuronSpeculationCausalLM(nn.Module):
+class NeuronSpeculationCausalLM(NeuronBase):
     """A Neuron-optimized causal language model with speculative decoding."""
-
-    def __init__(
-        self,
-        config: PretrainedConfig,
-    ) -> None:
-        super().__init__()
-        self.config = config
-        self.logits_processor = LogitsProcessor(config.vocab_size,
-                                                logits_as_input=True)
-        # Lazy initialized
-        self.model: nn.Module
-
-        self.kv_caches: Optional[List[Any]] = None
 
     def forward(
         self,
@@ -522,7 +495,6 @@ class NeuronSpeculationCausalLM(nn.Module):
                 for k, v in override_neuron_config.items():
                     setattr(self.model.config.neuron_config, k, v)
             self.model.load(compiled_model_path)
-            self.get_kv_cache()
             logger.info(
                 "Successfully loaded precompiled model artifacts from %s",
                 compiled_model_path)
@@ -550,26 +522,6 @@ class NeuronSpeculationCausalLM(nn.Module):
         self.model = neuronx_model_cls(model_name_or_path, config)
         self.model.compile(compiled_model_path)
         self.model.load(compiled_model_path)
-        self.get_kv_cache()
-
-    # TODO move to NXDI
-    def get_kv_cache(self):
-        if self.kv_caches is None:
-            kv_caches = []
-            tp_tensors_map = collections.defaultdict(list)
-            state = self.model.context_encoding_model.model.nxd_model.state
-
-            # rearrange tensors with tp
-            for tp_idx, per_tp_state in enumerate(state):
-                for key, val in per_tp_state.items():
-                    tp_tensors_map[tp_idx].append(val)
-
-            for i in range(len(tp_tensors_map[0])):
-                for tp, tensors in tp_tensors_map.items():
-                    kv_caches.append(tensors[i])
-            self.kv_caches = kv_caches
-
-        return self.kv_caches
 
 
 def _get_model_architecture(config: PretrainedConfig) -> str:
@@ -656,12 +608,9 @@ def get_neuron_model(model_config: ModelConfig,
         default_neuron_config_args, model_config.override_neuron_config)
 
     override_neuron_config = model_config.override_neuron_config
-    if override_neuron_config is None:
-        override_neuron_config = {}
     model.load_weights(model_config.model,
                        neuron_config=neuron_config,
                        override_neuron_config=override_neuron_config)
-    logger.info("model loaded")
     return model.eval()
 
 
@@ -670,8 +619,8 @@ def get_neuron_speculation_model(model_config: ModelConfig,
                                  scheduler_config: SchedulerConfig,
                                  speculation_config: SpeculativeConfig):
     """Initializes a neuron-optimized speculation model for inference.
-    
-    This model handles speculation using both a draft model and an EAGLE draft. 
+
+    This model handles speculation using both a draft model and an EAGLE draft.
     """
     model = NeuronSpeculationCausalLM(model_config.hf_config)
     default_neuron_config_args = _get_default_speculation_config(
@@ -680,11 +629,8 @@ def get_neuron_speculation_model(model_config: ModelConfig,
         default_neuron_config_args, model_config.override_neuron_config)
 
     override_neuron_config = model_config.override_neuron_config
-    if override_neuron_config is None:
-        override_neuron_config = {}
     model.load_weights(model_config.model,
                        speculation_config.draft_model_config.model,
                        neuron_config=neuron_config,
                        override_neuron_config=override_neuron_config)
-    logger.info("spec model loaded")
     return model.eval()

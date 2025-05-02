@@ -355,9 +355,6 @@ class LLMEngine:
             for v_id in range(self.parallel_config.pipeline_parallel_size)
         ]
 
-        self.scheduler[0].register_model_executable(
-            self.model_executor.driver_worker.model_runner.model)
-
         # Metric Logging.
         if self.log_stats:
             if stat_loggers is not None:

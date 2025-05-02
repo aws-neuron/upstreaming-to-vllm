@@ -335,7 +335,7 @@ class GroupCoordinator:
                 return input_
             except ImportError:
                 """
-                Intel IPEX not found. Falling back to PyTorch native 
+                Intel IPEX not found. Falling back to PyTorch native
                 all_reduce for CPU
                 """
                 torch.distributed.all_reduce(input_, group=self.device_group)
@@ -1082,10 +1082,9 @@ def ensure_kv_transfer_initialized(vllm_config: "VllmConfig") -> None:
             vllm_config.kv_transfer_config.need_kv_parallel_group, _KV_TRANSFER
             is None
     ]):
-        _KV_TRANSFER = kv_transfer.KVTransferAgent(
-            rank=get_world_group().rank,
-            local_rank=get_world_group().local_rank,
-            config=vllm_config)
+        _KV_TRANSFER = kv_transfer.KVTransferAgent(rank=0,
+                                                   local_rank=0,
+                                                   config=vllm_config)
 
 
 def ensure_model_parallel_initialized(

@@ -244,16 +244,10 @@ class PyNcclPipe(KVPipeBase):
         self.transport_thread.submit(self.send_tensor_wrapper, tensor,
                                      tensor_size)
 
-    def recv_tensor(self,
-                    is_signal_pipe: bool = False) -> Optional[torch.Tensor]:
+    def recv_tensor(self) -> Optional[torch.Tensor]:
         """
         Receives a tensor and its metadata from the source rank. Blocking call.
 
-        Args:
-            is_signal_pipe (bool): Whether it is signal pipe (not data pipe).
-                                   Default false. Not used in this 
-                                   implementation.
-        
         Returns:
             - tensor: The received tensor, or None if no tensor is received.
         """

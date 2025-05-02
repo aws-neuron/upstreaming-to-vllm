@@ -254,8 +254,7 @@ class MooncakePipe(KVPipeBase):
         assert (len(tensor.shape) > 0)
         self.transport_thread.submit(self._send_impl, tensor)
 
-    def recv_tensor(self,
-                    is_signal_pipe: bool = False) -> Optional[torch.Tensor]:
+    def recv_tensor(self) -> Optional[torch.Tensor]:
         """Receive tensor from other processes."""
         if self.transport_thread is None:
             self.transport_thread = ThreadPoolExecutor(max_workers=1)

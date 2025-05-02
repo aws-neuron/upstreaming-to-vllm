@@ -234,11 +234,11 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
         is_prompt = seq_group_metadata_list[0].is_prompt
         # Prepare input tensors.
         if is_prompt:
-            (input_tokens, input_positions, input_block_ids, seq_lens,
-             multi_modal_kwargs
+            (request_ids, input_tokens, input_positions, input_block_ids,
+             seq_lens, multi_modal_kwargs
              ) = self._prepare_prompt(seq_group_metadata_list)
         else:
-            (input_tokens, input_positions,
+            (request_ids, input_tokens, input_positions,
              input_block_ids) = self._prepare_decode(seq_group_metadata_list)
             seq_lens = None
 
@@ -272,7 +272,8 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
             self.pin_memory,
             generators=self.get_generators(finished_requests_ids))
 
-        return ModelInputForNeuron(input_tokens=input_tokens,
+        return ModelInputForNeuron(request_ids=request_ids,
+                                   input_tokens=input_tokens,
                                    input_positions=input_positions,
                                    input_block_ids=input_block_ids,
                                    sampling_metadata=sampling_metadata,

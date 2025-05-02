@@ -2657,9 +2657,6 @@ class KVTransferConfig(BaseModel):
     # The KV connector port, used to build distributed connection
     kv_port: int = 14579
 
-    # Wait time for signal pipe for waiting requests to avoid server timeout
-    wait_timeout_minutes: int = 1440
-
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,

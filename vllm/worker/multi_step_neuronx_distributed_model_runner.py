@@ -51,17 +51,19 @@ class MultiStepNeuronxDistributedModelRunner(NeuronxDistributedModelRunner):
         model_executable = self.model
         bypass_model_exec = False
         kv_caches = []
-        if self.need_recv_kv(model_input, kv_caches):
-            logger.debug("Waiting to receive tensors.")
+        if self.need_recv_kv(model_input):
+            # It doesn't trigger KV cache transfer here which
+            # could block decode, transfer was trigger during scheduler
+            # and completed at this point, so here we directly
+            # get hidden_states (output tokens with on-device sampling)
+            # from connector
             logits, bypass_model_exec, model_input = \
-                get_kv_transfer_group().connector.recv_kv_caches_and_hidden_states_from_local_buffer(
-                    # model is used to know which layer the current worker
-                    # is working on, so that we can receive KV for only those
-                    # layers.
+                get_kv_transfer_group().recv_kv_caches_and_hidden_states(
                     model_executable,
                     model_input,
                     kv_caches=kv_caches,
                 )
+            assert bypass_model_exec
         logger.debug("bypass_model_exec: %s", bypass_model_exec)
         if not bypass_model_exec:
             logger.debug(
@@ -75,12 +77,10 @@ class MultiStepNeuronxDistributedModelRunner(NeuronxDistributedModelRunner):
                                              or {},
                                              device=self.device),
             )
-        if self.need_send_kv(model_input, kv_caches):
+        if self.need_send_kv(model_input):
             logger.debug(
                 "Sending KV cache, model output, and hidden_states (if EAGLE)."
             )
-            kv_caches = model_executable.get_kv_cache()
-
             get_kv_transfer_group().send_kv_caches_and_hidden_states(
                 # model_executable is used to know which layer the current
                 # worker is working on, so that we can send KV for only those

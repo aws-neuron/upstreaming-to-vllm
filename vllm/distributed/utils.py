@@ -5,7 +5,6 @@
 # https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/tensor_parallel/utils.py
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 import dataclasses
-import datetime
 import pickle
 import time
 from collections import deque
@@ -145,15 +144,11 @@ class StatelessProcessGroup:
             else:
                 break
 
-    def recv_obj(self,
-                 src: int,
-                 wait_timeout_minutes: Optional[int] = None) -> Any:
+    def recv_obj(self, src: int) -> Any:
         """Receive an object from a source rank."""
-        key = f"send_to/{self.rank}/{self.recv_src_counter[src]}"
-        if wait_timeout_minutes is not None:
-            self.store.wait([key],
-                            datetime.timedelta(minutes=wait_timeout_minutes))
-        obj = pickle.loads(self.store.get(key))
+        obj = pickle.loads(
+            self.store.get(
+                f"send_to/{self.rank}/{self.recv_src_counter[src]}"))
         self.recv_src_counter[src] += 1
         return obj
 

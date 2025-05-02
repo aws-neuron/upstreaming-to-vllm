@@ -45,8 +45,7 @@ KVConnectorFactory.register_connector(
     "SimpleConnector")
 
 KVConnectorFactory.register_connector(
-    "NeuronConnector",
-    "vllm.distributed.kv_transfer.kv_connector.neuron_connector",
+    "NeuronConnector", "vllm.distributed.kv_transfer.neuron.neuron_connector",
     "NeuronConnector")
 
 KVConnectorFactory.register_connector(
