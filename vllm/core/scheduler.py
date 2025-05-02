@@ -10,13 +10,9 @@ from typing import Callable, Deque, Dict, Iterable, List, Optional
 from typing import Sequence as GenericSequence
 from typing import Set, Tuple, Union
 
-import torch
-
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.distributed.kv_transfer import get_kv_transfer_group
-from vllm.distributed.kv_transfer.kv_connector.neuron_connector import (
-    NeuronConnector)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.prompt_adapter.request import PromptAdapterRequest
@@ -558,9 +554,6 @@ class Scheduler:
         """The number of new tokens."""
         return 1
 
-    def register_model_executable(self, model_executable):
-        self.model_executable = model_executable
-
     def add_seq_group(self, seq_group: SequenceGroup) -> None:
         # Add sequence groups to the waiting queue.
         self.waiting.append(seq_group)
@@ -1043,8 +1036,8 @@ class Scheduler:
         return force_preemption_count
 
     def _schedule_waiting_to_transferring(self, ) -> List[SequenceGroup]:
-        """(Experimental for DI decode node) 
-        Scan the waiting queue, and put into transferring queue 
+        """(Experimental for DI decode node)
+        Scan the waiting queue, and put into transferring queue
         """
         ignored_seq_groups: List[SequenceGroup] = []
         seq_groups: List[SequenceGroup] = []
@@ -1075,15 +1068,10 @@ class Scheduler:
 
             self.block_manager.allocate(seq_group)
 
-            # we don't concatenate the seqs here
-            input_ids = torch.tensor(seq_group.seqs[0].inputs.prompt_token_ids)
-
             # trigger KV cache transfer
-            seq_id = self.block_manager.get_block_table(seq_group.seqs[0])[0]
-            neuron_connector = get_kv_transfer_group().connector
-            assert isinstance(neuron_connector, NeuronConnector)
-            neuron_connector.async_recv_kv_caches_and_hidden_states(
-                self.model_executable, input_ids, seq_id)
+            block_ids = self.block_manager.get_block_table(seq_group.seqs[0])
+            get_kv_transfer_group().async_recv_kv_caches(
+                seq_group.request_id, block_ids)
 
             # put into transferring queue
             for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
@@ -1119,22 +1107,16 @@ class Scheduler:
         while self._passed_delay(time.time()) and self.transferring:
             seq_group = self.transferring[0]
 
-            input_ids = torch.tensor(seq_group.seqs[0].inputs.prompt_token_ids)
-            seq_id = self.block_manager.get_block_table(seq_group.seqs[0])[0]
-            neuron_connector = get_kv_transfer_group().connector
-            assert isinstance(neuron_connector, NeuronConnector)
-            assert neuron_connector.consumer_buffer is not None
-            transfer_ready_status, _ = neuron_connector.consumer_buffer\
-                .check_transfer_status(seq_id, input_ids)
+            transfer_done = get_kv_transfer_group().check_transfer_done(
+                seq_group.request_id)
 
             force_sync_recv = os.environ.get("DI_FORCE_SYNC_RECV", None)
-            if transfer_ready_status or force_sync_recv == "1":
+            if transfer_done or force_sync_recv == "1":
 
                 # when force_sync_recv, busy wait until the transfer is done
-                while not transfer_ready_status:
-                    transfer_ready_status, _ = neuron_connector\
-                        .consumer_buffer.check_transfer_status(
-                        seq_id, input_ids)
+                while not transfer_done:
+                    transfer_done = get_kv_transfer_group(
+                    ).check_transfer_done(seq_group.request_id)
 
                 transferring_seqs = seq_group.get_seqs(
                     status=SequenceStatus.TRANSFERRING)
@@ -1446,7 +1428,6 @@ class Scheduler:
 
         if len(prefills.seq_groups
                ) == 0 and self.scheduler_config.policy == "priority":
-            raise AssertionError("preemption should happen for Neuron")
             self._schedule_priority_preemption(budget)
 
         # Don't schedule decodes if prefills are scheduled.
@@ -1900,14 +1881,9 @@ class Scheduler:
     def free_transferred_seq_groups(self):
         remaining: Deque[SequenceGroup] = deque()
         for seq_group in self.transferring:
-            input_ids = torch.tensor(seq_group.seqs[0].inputs.prompt_token_ids)
-            seq_id = self.block_manager.get_block_table(seq_group.seqs[0])[0]
-            neuron_connector = get_kv_transfer_group().connector
-            assert isinstance(neuron_connector, NeuronConnector)
-            assert neuron_connector.producer_buffer is not None
-            status, _ = neuron_connector.producer_buffer.check_transfer_status(
-                seq_id, input_ids, remove=True)
-            if not status:
+            transfer_done = get_kv_transfer_group().check_transfer_done(
+                seq_group.request_id)
+            if not transfer_done:
                 remaining.append(seq_group)
             else:
                 self._free_finished_seq_group(seq_group)
@@ -1921,16 +1897,9 @@ class Scheduler:
                 remaining.append(seq_group)
             else:
                 if os.environ.get("ASYNC_DI_PRODUCER", None) == "1":
-                    input_ids = torch.tensor(
-                        seq_group.seqs[0].inputs.prompt_token_ids)
-                    seq_id = self.block_manager.get_block_table(
-                        seq_group.seqs[0])[0]
-                    neuron_connector = get_kv_transfer_group().connector
-                    assert isinstance(neuron_connector, NeuronConnector)
-                    assert neuron_connector.producer_buffer is not None
-                    status, _ = neuron_connector.producer_buffer\
-                        .check_transfer_status(seq_id, input_ids, remove=True)
-                    if not status:
+                    trasnfer_done = get_kv_transfer_group(
+                    ).check_transfer_done(seq_group.request_id)
+                    if not trasnfer_done:
                         logger.debug(
                             "seq_group %s hasn't finished "
                             "transferring, will put into transfer "
