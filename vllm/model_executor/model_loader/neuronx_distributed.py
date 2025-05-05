@@ -181,8 +181,9 @@ class NeuronCausalLM(nn.Module):
         try:
             self.model = neuronx_model_cls(compiled_model_path)
             override_neuron_config = kwargs["override_neuron_config"]
-            for k, v in override_neuron_config.items():
-                setattr(self.model.config.neuron_config, k, v)
+            if override_neuron_config is not None:
+                for k, v in override_neuron_config.items():
+                    setattr(self.model.config.neuron_config, k, v)
             self.model.load(compiled_model_path)
             self.config.neuron_config = self.model.config.neuron_config
             logger.info(
@@ -491,8 +492,9 @@ class NeuronSpeculationCausalLM(nn.Module):
         try:
             self.model = neuronx_model_cls(compiled_model_path)
             override_neuron_config = kwargs["override_neuron_config"]
-            for k, v in override_neuron_config.items():
-                setattr(self.model.config.neuron_config, k, v)
+            if override_neuron_config is not None:
+                for k, v in override_neuron_config.items():
+                    setattr(self.model.config.neuron_config, k, v)
             self.model.load(compiled_model_path)
             logger.info(
                 "Successfully loaded precompiled model artifacts from %s",
