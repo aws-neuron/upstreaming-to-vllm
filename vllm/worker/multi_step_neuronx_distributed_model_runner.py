@@ -30,9 +30,13 @@ class MultiStepNeuronxDistributedModelRunner(NeuronxDistributedModelRunner):
             get_neuron_speculation_model)
         self.model = get_neuron_speculation_model(
             self.model_config,
+            cache_config=self.cache_config,
             parallel_config=self.parallel_config,
             scheduler_config=self.scheduler_config,
             speculation_config=self.speculative_config)
+        self.is_block_kv_layout = self.model.neuron_config.is_block_kv_layout
+        self.is_prefix_caching = self.model.neuron_config.is_prefix_caching
+        self.model.is_reorder_needed = not self.is_block_kv_layout
 
     @torch.inference_mode()
     def execute_model(

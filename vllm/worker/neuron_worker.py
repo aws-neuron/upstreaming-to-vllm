@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """A Neuron worker class."""
 import os
+from math import ceil
 from typing import List, Optional, Set, Tuple
 
 import torch.distributed
@@ -126,10 +127,20 @@ class NeuronWorker(LocalOrDistributedWorkerBase):
 
         We configure num_gpu_blocks to be equal to max_num_seqs.
         """
-        # Set the number of GPU blocks to be the same as the maximum number of
-        # sequences that can be processed in a single batch. This is equivalent
-        # to schedule without PagedAttention.
-        num_gpu_blocks = self.scheduler_config.max_num_seqs
+        # Block KV layout is enabled when the block size is smaller than the max
+        # sequence length. Otherwise, the number of blocks is set to the same as
+        # the maximum number of sequences that can be processed in a single
+        # batch.
+        # `--num-gpu-blocks-override` use this flag to override the calculation
+        #  below
+        # TODO: fix the num_gpu_blocks calculation based on the memory space in
+        # Neuron.
+        if self.cache_config.block_size != self.scheduler_config.max_model_len:
+            num_gpu_blocks = ceil(self.scheduler_config.max_model_len //
+                                  self.cache_config.block_size
+                                  ) * self.scheduler_config.max_num_seqs
+        else:
+            num_gpu_blocks = self.scheduler_config.max_num_seqs
 
         # Swap not yet supported with Neuron backend.
         num_cpu_blocks = 0
@@ -143,7 +154,6 @@ class NeuronWorker(LocalOrDistributedWorkerBase):
 
         # Different values are not tested.
         assert num_cpu_blocks == 0
-        assert num_gpu_blocks == self.scheduler_config.max_num_seqs
 
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks

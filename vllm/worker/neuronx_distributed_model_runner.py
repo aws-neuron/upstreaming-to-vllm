@@ -70,9 +70,13 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
             self.lora_checkpoint = LoraCheckpoint(self.lora_serving_config)
         self.model = get_neuron_model(
             self.model_config,
+            cache_config=self.cache_config,
             parallel_config=self.parallel_config,
             scheduler_config=self.scheduler_config,
             lora_serving_config=self.lora_serving_config)
+        self.is_block_kv_layout = self.model.neuron_config.is_block_kv_layout
+        self.is_prefix_caching = self.model.neuron_config.is_prefix_caching
+        self.model.is_reorder_needed = not self.is_block_kv_layout
 
     def get_nxd_sampling_params(self, sampling_metadata):
         if self.model.config.neuron_config.on_device_sampling_config:
@@ -235,11 +239,14 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
         # Prepare input tensors.
         if is_prompt:
             (request_ids, input_tokens, input_positions, input_block_ids,
-             seq_lens, multi_modal_kwargs
+             slot_mapping, input_block_tables, full_context_lens,
+             computed_context_lens, seq_lens, multi_modal_kwargs
              ) = self._prepare_prompt(seq_group_metadata_list)
         else:
-            (request_ids, input_tokens, input_positions,
-             input_block_ids) = self._prepare_decode(seq_group_metadata_list)
+            (request_ids, input_tokens, input_positions, input_block_ids,
+             slot_mapping, input_block_tables, full_context_lens,
+             computed_context_lens
+             ) = self._prepare_decode(seq_group_metadata_list)
             seq_lens = None
 
         if not self._on_device_sampling_disabled:
@@ -276,6 +283,10 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
                                    input_tokens=input_tokens,
                                    input_positions=input_positions,
                                    input_block_ids=input_block_ids,
+                                   slot_mapping=slot_mapping,
+                                   input_block_tables=input_block_tables,
+                                   full_context_lens=full_context_lens,
+                                   computed_context_lens=computed_context_lens,
                                    sampling_metadata=sampling_metadata,
                                    multi_modal_kwargs=multi_modal_kwargs,
                                    adapter_ids=lora_adapter_ids)

@@ -1090,7 +1090,7 @@ class EngineArgs:
             self.enable_prefix_caching = False
 
         cache_config = CacheConfig(
-            block_size=self.block_size,
+            block_size=self._get_block_size(),
             gpu_memory_utilization=self.gpu_memory_utilization,
             swap_space=self.swap_space,
             cache_dtype=self.kv_cache_dtype,
@@ -1306,6 +1306,29 @@ class EngineArgs:
         if envs.VLLM_USE_V1:
             self._override_v1_engine_config(config)
         return config
+
+    def _get_block_size(self) -> Optional[int]:
+        if self._is_block_kv_layout_enabled():
+            return self.block_size
+        else:
+            return self.max_model_len
+
+    def _is_block_kv_layout_enabled(self) -> bool:
+        if self.device != "neuron":
+            return True
+
+        if self.enable_prefix_caching:
+            return True
+
+        if self.override_neuron_config:
+            if self.override_neuron_config.get("is_block_kv_layout", False):
+                return True
+            if self.override_neuron_config.get("is_prefix_caching", False):
+                return True
+            if self.override_neuron_config.get("is_chunked_prefill", False):
+                return True
+
+        return False
 
     def _override_v1_engine_args(self, usage_context: UsageContext) -> None:
         """
