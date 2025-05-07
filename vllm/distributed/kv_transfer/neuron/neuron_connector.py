@@ -37,12 +37,14 @@ class NeuronConnector(KVConnectorBase):
                                        self.neuron_recv_ip,
                                        self.config.kv_ip,
                                        self.config.kv_port,
+                                       self.config.kv_map_path,
                                        send=True)
         else:
             self.buffer = NeuronBuffer(self.zmq_context,
                                        self.neuron_send_ip,
                                        self.config.kv_ip,
                                        self.config.kv_port,
+                                       self.config.kv_map_path,
                                        send=False)
 
     def close(self):

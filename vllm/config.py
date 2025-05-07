@@ -3654,6 +3654,9 @@ class KVTransferConfig:
     wait_timeout_minutes: int = 1440
     """Wait time for signal pipe for waiting requests to avoid server timeout"""
 
+    # Path to json file that defines mapping from cores to KV heads and seq_ids
+    kv_map_path: Optional[str] = None
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
