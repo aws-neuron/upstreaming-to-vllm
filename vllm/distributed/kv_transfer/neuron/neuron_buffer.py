@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-import math
 import queue
 import threading
 import time
@@ -10,6 +9,8 @@ import zmq
 
 from vllm.distributed.kv_transfer.neuron.neuron_transfer_engine import (
     NeuronTransferEngine)
+from vllm.distributed.kv_transfer.neuron.nxdi_kv_map_utils import (
+    setup_transfer_scheme, validate_and_load_kv_map)
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -26,11 +27,17 @@ class LookupEntry:
 
 class NeuronBuffer:
 
-    def __init__(self, zmq_context, remote_ip, zmq_ip, zmq_port, send=True):
+    def __init__(self,
+                 zmq_context,
+                 remote_ip,
+                 zmq_ip,
+                 zmq_port,
+                 kv_map_path,
+                 send=True):
         logger.info(
-            "initialize {'send' if send else 'recv'} buffer, " \
+            "initialize %s buffer, " \
             "with server zmq %s:%s, transfer to remote_ip %s ",
-            zmq_ip, zmq_port, remote_ip,
+            'send' if send else 'recv', zmq_ip, zmq_port, remote_ip,
         )
         if send:
             self.socket = zmq_context.socket(zmq.REP)
@@ -44,6 +51,32 @@ class NeuronBuffer:
             self.socket.send_string("hello from client")
             response = self.socket.recv_string()
             logger.info("Get handshake msg %s from server", response)
+
+        # Try to load kv_map_path from kv_transfer_config if specified
+        # and also exchange KV maps
+        if kv_map_path:
+            kv_map = validate_and_load_kv_map(kv_map_path)
+            # Exchange KV maps
+            if send:
+                # on sender receive first and send later due to ZMQ rules
+                peer_kv_map = self.socket.recv_pyobj()
+                self.socket.send_pyobj(kv_map)
+            else:
+                self.socket.send_pyobj(kv_map)
+                peer_kv_map = self.socket.recv_pyobj()
+            logger.info("sent kv_map: %s", kv_map)
+            logger.info("received peer_kv_map: %s", peer_kv_map)
+        else:
+            # If KV map path is not specified set up default scheme by setting
+            # to None.
+            # Note we assume that sender and receiver either both have or
+            # both don't have a KV map.
+            kv_map = None
+            peer_kv_map = None
+        logger.info("Done exchanging KV maps")
+        self.producer_kv_map = kv_map if send else peer_kv_map
+        self.consumer_kv_map = peer_kv_map if send else kv_map
+        self.is_kv_producer = send
 
         self.buffer_lock = threading.Lock()
         self.lookup_dict = {}
@@ -63,31 +96,34 @@ class NeuronBuffer:
 
         self.kv_caches = None
 
+    def setup_kv_scheme(self):
+        # Try to load kv_map_path from kv_transfer_config if specified
+        assert self.kv_caches is not None
+        max_num_seqs = self.kv_caches[0].shape[0]
+        self.transfer_sequences = setup_transfer_scheme(
+            self.kv_caches,
+            producer_kv_map=self.producer_kv_map,
+            consumer_kv_map=self.consumer_kv_map,
+            max_num_seqs=max_num_seqs,
+            is_producer=self.is_kv_producer)
+        logger.info("Done setting up KV transfer scheme")
+
     def register_kv_caches(self, kv_caches):
         self.kv_caches = kv_caches
+        # TODO: move setup_kv_scheme to init. Currently it relies on kv_caches
+        # being available to get the shape information and also it populates the
+        # tensors in the transfer scheme. We can consider storing a indexing
+        # instead of storing the actual tensors in the transfer sequence list.
+        self.setup_kv_scheme()
 
-    def generate_transfer_sequences(self, kv_caches, block_ids):
+    def generate_transfer_sequences(self, block_ids):
         """
-        transfer scheme that support only same sharding
-        and contiguous KV cache layout, block_ids in this
-        case is a 0-dim tensor as seq_id
-        """
+        return pre-generated transfer sequence by indexing with seq_id
 
+        TODO: modify once we support block-wise kv cache
+        """
         seq_id = block_ids[0]
-
-        tensors = []
-        peer_devices = []
-        lengths = []
-        offsets = []
-        for tensor in kv_caches:
-            tensors.append(tensor)
-            peer_devices.append(tensor.device.index)
-            length = math.prod(list(tensor.shape[1:])) * tensor.element_size()
-            offset = length * seq_id
-            lengths.append(length)
-            offsets.append(offset)
-
-        return tensors, offsets, lengths, peer_devices
+        return self.transfer_sequences[seq_id]
 
     def get_output_token(self, request_id):
         assert request_id in self.lookup_dict, f"Cannot find \
@@ -142,8 +178,7 @@ class NeuronBuffer:
                 })
 
                 kv_caches, offsets, lengths, peer_devices = \
-                    self.generate_transfer_sequences(self.kv_caches,
-                                                     entry.block_ids)
+                    self.generate_transfer_sequences(entry.block_ids)
                 self.transfer_engine.transfer_neuron_tensors(kv_caches,
                                                              offsets,
                                                              lengths,
@@ -185,8 +220,7 @@ class NeuronBuffer:
                         response["output_token"]).unsqueeze(0)
 
                     kv_caches, offsets, lengths, peer_devices = \
-                        self.generate_transfer_sequences(self.kv_caches,
-                                                         entry.block_ids)
+                        self.generate_transfer_sequences(entry.block_ids)
                     self.transfer_engine.transfer_neuron_tensors(kv_caches,
                                                                  offsets,
                                                                  lengths,

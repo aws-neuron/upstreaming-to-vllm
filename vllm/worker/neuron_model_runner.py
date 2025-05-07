@@ -537,6 +537,8 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             seq_group.sampling_params.temperature
         ] for seq_group in model_input.sampling_metadata.seq_groups]))
 
+        model_executable = self.model
+
         if use_neuronx_distributed():
             bypass_model_exec = False
             if self.need_recv_kv(model_input):
@@ -545,11 +547,11 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                 # and completed at this point, so here we directly
                 # get hidden_states (output tokens with on-device sampling)
                 # from connector
-                hidden_states = get_kv_transfer_group(
-                ).recv_kv_caches_and_hidden_states(
-                    None,
+                hidden_states, bypass_model_exec, model_input = \
+                get_kv_transfer_group().recv_kv_caches_and_hidden_states(
+                    model_executable,
                     model_input,
-                    None,
+                    kv_caches,
                 )
 
                 assert bypass_model_exec, (
@@ -575,11 +577,18 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                 )
 
             if self.need_send_kv(model_input):
-                logger.debug("Sending KV cache")
-
-                get_kv_transfer_group().async_send_kv_caches(
-                    None, model_input, None, hidden_states)
-
+                logger.debug(
+                    "Sending KV cache, model output, and hidden_states (if "
+                    "EAGLE).")
+                get_kv_transfer_group().send_kv_caches_and_hidden_states(
+                    # model_executable is used to know which layer the current
+                    # worker is working on, so that we can send KV for only
+                    # those layers.
+                    model_executable,
+                    model_input,
+                    kv_caches,
+                    hidden_states,
+                )
         elif use_transformers_neuronx():
             # [TODO] validate on-device sampling
             # The model signature may need change for on-device sampling

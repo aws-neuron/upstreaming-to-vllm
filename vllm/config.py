@@ -2657,6 +2657,9 @@ class KVTransferConfig(BaseModel):
     # The KV connector port, used to build distributed connection
     kv_port: int = 14579
 
+    # Path to json file that defines mapping from cores to KV heads and seq_ids
+    kv_map_path: Optional[str] = None
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
