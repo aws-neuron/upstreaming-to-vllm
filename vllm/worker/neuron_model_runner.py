@@ -9,7 +9,6 @@ import torch
 from torch import nn
 
 from vllm.config import DeviceConfig, VllmConfig
-from vllm.distributed import get_kv_transfer_group
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
@@ -22,7 +21,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
 from vllm.utils import is_pin_memory_available, make_tensor_with_pad
 from vllm.worker.model_runner_base import ModelRunnerBase, ModelRunnerInputBase
-from vllm.worker.utils import use_neuronx_distributed, use_transformers_neuronx
+from vllm.worker.utils import use_transformers_neuronx
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
@@ -46,6 +45,9 @@ class ModelInputForNeuron(ModelRunnerInputBase):
     sampling_metadata: SamplingMetadata = None
     multi_modal_kwargs: BatchedTensorInputs = None
     adapter_ids: Optional[str] = None
+    # Boolean tensor to indicate if the request is ready
+    # for sampling. Needed by chunked prefill.
+    prefill_completion_state: Optional[torch.Tensor] = None
 
     def as_broadcastable_tensor_dict(
             self) -> Dict[str, Union[int, torch.Tensor]]:
@@ -104,9 +106,6 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         self.device = self.device_config.device
         self.pin_memory = is_pin_memory_available()
 
-        self.is_block_kv_layout = self.cache_config.block_size \
-                                != self.scheduler_config.max_model_len
-
         # Multi-modal data support
         self.multi_modal_input_mapper = MULTIMODAL_REGISTRY \
             .create_input_mapper(self.model_config)
@@ -126,6 +125,9 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
 
         if not self._on_device_sampling_disabled:
             self._init_neuron_sampling()
+
+        # Prefix caching is not supported by Transformer-NeuronX
+        self.is_prefix_caching = False
 
     def _init_neuron_sampling(self) -> None:
         if use_transformers_neuronx():
@@ -152,10 +154,6 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         self.model = get_neuron_model(self.model_config,
                                       parallel_config=self.parallel_config,
                                       scheduler_config=self.scheduler_config)
-
-        # Disable prefix caching and chunked prefill by default
-        self.is_prefix_caching = False
-        self.is_chunked_prefill = False
 
     def get_model(self) -> nn.Module:
         return self.model
@@ -530,77 +528,23 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             raise ValueError(
                 "NeuronModelRunner does not support multi-step execution.")
 
-        # extract top_k, top_p and temperature from model_input for neuron
-        # forward call
-        sampling_params = (torch.tensor([[
-            seq_group.sampling_params.top_k, seq_group.sampling_params.top_p,
-            seq_group.sampling_params.temperature
-        ] for seq_group in model_input.sampling_metadata.seq_groups]))
+        # [TODO] validate on-device sampling
+        # The model signature may need change for on-device sampling
+        hidden_states = self.model(
+            input_ids=model_input.input_tokens,
+            positions=model_input.input_positions,
+            input_block_ids=model_input.input_block_ids,
+            **MultiModalKwargs.as_kwargs(model_input.multi_modal_kwargs or {},
+                                         device=self.device),
+        )
+        sampled_output = self._sample(hidden_states, model_input)
+        return [sampled_output]
 
-        model_executable = self.model
-
-        if use_neuronx_distributed():
-            bypass_model_exec = False
-            if self.need_recv_kv(model_input):
-                # It doesn't trigger KV cache transfer here which
-                # could block decode, transfer was trigger during scheduler
-                # and completed at this point, so here we directly
-                # get hidden_states (output tokens with on-device sampling)
-                # from connector
-                hidden_states, bypass_model_exec, model_input = \
-                get_kv_transfer_group().recv_kv_caches_and_hidden_states(
-                    model_executable,
-                    model_input,
-                    kv_caches,
-                )
-
-                assert bypass_model_exec, (
-                    "bypass_model_exec is not True "
-                    "for decode worker when processing prompt")
-
-            logger.debug("bypass_model_exec: %s", bypass_model_exec)
-
-            if not bypass_model_exec:
-                hidden_states = self.model(
-                    input_ids=model_input.input_tokens,
-                    positions=model_input.input_positions,
-                    input_block_ids=model_input.input_block_ids,
-                    slot_mapping=model_input.slot_mapping,
-                    input_block_tables=model_input.input_block_tables,
-                    full_context_lens=model_input.full_context_lens,
-                    computed_context_lens=model_input.computed_context_lens,
-                    sampling_params=sampling_params,
-                    adapter_ids=model_input.adapter_ids,
-                    **MultiModalKwargs.as_kwargs(model_input.multi_modal_kwargs
-                                                 or {},
-                                                 device=self.device),
-                )
-
-            if self.need_send_kv(model_input):
-                logger.debug(
-                    "Sending KV cache, model output, and hidden_states (if "
-                    "EAGLE).")
-                get_kv_transfer_group().send_kv_caches_and_hidden_states(
-                    # model_executable is used to know which layer the current
-                    # worker is working on, so that we can send KV for only
-                    # those layers.
-                    model_executable,
-                    model_input,
-                    kv_caches,
-                    hidden_states,
-                )
-        elif use_transformers_neuronx():
-            # [TODO] validate on-device sampling
-            # The model signature may need change for on-device sampling
-            hidden_states = self.model(
-                input_ids=model_input.input_tokens,
-                positions=model_input.input_positions,
-                input_block_ids=model_input.input_block_ids,
-                **MultiModalKwargs.as_kwargs(model_input.multi_modal_kwargs
-                                             or {},
-                                             device=self.device),
-            )
-
+    def _sample(
+        self,
+        hidden_states: torch.Tensor,
+        model_input: ModelInputForNeuron,
+    ):
         # Compute the logits only if the on-device sampling is turned off as
         # on-device sampling outputs the token ids.
         if self._on_device_sampling_disabled:
@@ -614,7 +558,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             logits=logits,
             sampling_metadata=model_input.sampling_metadata,
         )
-        return [output]
+        return output
 
     @property
     def vocab_size(self) -> int:

@@ -1317,7 +1317,7 @@ class EngineArgs:
         if self.device != "neuron":
             return True
 
-        if self.enable_prefix_caching:
+        if self.enable_prefix_caching or self.enable_chunked_prefill:
             return True
 
         if self.override_neuron_config:
