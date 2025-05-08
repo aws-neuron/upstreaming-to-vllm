@@ -379,6 +379,10 @@ class NeuronSpeculationCausalLM(NeuronBase):
         positions: torch.Tensor,
         input_block_ids: torch.Tensor,
         sampling_params: torch.Tensor,
+        slot_mapping: Optional[torch.Tensor],
+        input_block_tables: Optional[torch.Tensor],
+        full_context_lens: Optional[torch.Tensor],
+        computed_context_lens: Optional[torch.Tensor],
     ) -> torch.Tensor:
         origin_input_block_ids = input_block_ids
         if self.is_reorder_needed:
@@ -393,11 +397,15 @@ class NeuronSpeculationCausalLM(NeuronBase):
                             attention_mask=None,
                             position_ids=positions,
                             seq_ids=input_block_ids,
-                            sampling_params=sampling_params)
+                            sampling_params=sampling_params,
+                            slot_mapping=slot_mapping,
+                            block_table=input_block_tables,
+                            full_context_lens=full_context_lens,
+                            computed_context_lens=computed_context_lens)
         if self.is_reorder_needed:
             restored_indices = torch.argsort(sorted_indices)
 
-        # CTX encoding
+        # CTX encoding, might need change for APC flow. Check
         if (positions[:, 0]).sum().item() == 0:
             output = output.fused_outputs[0][:, 0:1]
             if self.is_reorder_needed and origin_input_block_ids.shape[0] != 1:
@@ -443,7 +451,7 @@ class NeuronSpeculationCausalLM(NeuronBase):
                    for token_id in accepted_token_ids_by_step[step_index]):
                 break
             step_output_token_ids = []
-            for sequence_index in range(batch_size):
+            for sequence_index in range(min(batch_size, len(seq_ids))):
                 token_id = accepted_token_ids_by_step[step_index][
                     sequence_index]
                 step_output_token_ids.append(
@@ -594,8 +602,12 @@ def _get_default_speculation_config(model_config: ModelConfig,
                                     speculation_config: SpeculativeConfig):
     """Generate a neuron config for speculative decoding based on vllm config
     args."""
+    max_num_blocks = ceil(
+        scheduler_config.max_model_len //
+        cache_config.block_size) * scheduler_config.max_num_seqs
     neuron_config = dict(
         tp_degree=parallel_config.tensor_parallel_size,
+        ctx_batch_size=1,
         batch_size=scheduler_config.max_num_seqs,
         max_context_length=scheduler_config.max_model_len,
         seq_len=scheduler_config.max_model_len,
@@ -603,12 +615,19 @@ def _get_default_speculation_config(model_config: ModelConfig,
         trace_tokengen_model=False,
         enable_fused_speculation=True,
         enable_bucketing=True,
+        is_continuous_batching=True,
         quantized=False,
         torch_dtype=TORCH_DTYPE_TO_NEURON_AMP[model_config.dtype],
         on_device_sampling_config=dict(
             top_k=1,
             do_sample=False,
-        ))
+        ),
+        # TODO: replace it with cache_config.num_gpu_blocks and also figure out
+        # the profiling path to get self.num_gpu_blocks
+        pa_num_blocks=max_num_blocks,
+        pa_block_size=cache_config.block_size,
+        is_prefix_caching=cache_config.enable_prefix_caching,
+        is_block_kv_layout=cache_config.enable_prefix_caching)
     return neuron_config
 
 
@@ -646,24 +665,21 @@ def get_neuron_model(model_config: ModelConfig, cache_config: CacheConfig,
 
 def _validate_neuron_config(cache_config: CacheConfig, neuron_config: Dict):
     if cache_config.enable_prefix_caching:
-        assert neuron_config.get("is_prefix_caching") and neuron_config.get(
-            "is_block_kv_layout"), (
-                "Must set is_prefix_caching=True and "
-                "is_block_kv_layout=True to enable prefix caching")
+        if not neuron_config.get("is_prefix_caching", False) or \
+            not neuron_config.get("is_block_kv_layout", False):
+            logger.warning(
+                "Prefix caching is enabled, setting is_prefix_caching=True and "
+                "is_block_kv_layout=True")
 
         neuron_config["is_prefix_caching"] = True
         neuron_config["is_block_kv_layout"] = True
 
-    if neuron_config.get("is_prefix_caching", False) is True:
-        assert neuron_config.get(
-            "is_block_kv_layout"
-        ), "Prefix caching requires block kv layout in Neuron"
-        neuron_config["is_block_kv_layout"] = True
+    if (neuron_config.get("is_prefix_caching", False) or \
+        neuron_config.get("is_chunked_prefill",False)) and \
+        not neuron_config.get("is_block_kv_layout", False):
 
-    if neuron_config.get("is_chunked_prefill", False) is True:
-        assert neuron_config.get(
-            "is_block_kv_layout"
-        ), "Chunked prefill requires block kv layout in Neuron"
+        logger.warning("Prefix caching / Chunked prefill requires block kv "
+                       "layout in Neuron, setting is_block_kv_layout=True")
         neuron_config["is_block_kv_layout"] = True
 
     logger.info("Neuron Config: %s", neuron_config)

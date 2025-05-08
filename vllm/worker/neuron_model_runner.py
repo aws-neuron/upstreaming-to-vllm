@@ -2,6 +2,7 @@
 
 import os
 from dataclasses import dataclass
+from itertools import chain
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Union
 
 import torch
@@ -271,6 +272,20 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                 slot_mapping, input_block_tables, full_context_lens,
                 computed_context_lens, seq_lens, multi_modal_kwargs)
 
+    def _get_slots_for_speculation(
+        self,
+        position,
+        block_table,
+        block_size,
+        speculation_length,
+    ) -> List[int]:
+        seq_slots = [
+            range(block_idx * block_size, (block_idx + 1) * block_size)
+            for block_idx in block_table
+        ]
+        flattened_seq_slots = list(chain(*seq_slots))
+        return flattened_seq_slots[position:position + speculation_length]
+
     def _prepare_decode(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
@@ -317,7 +332,15 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                     block_offset = position % self.cache_config.block_size
                     slot = block_number * self.cache_config.block_size \
                             + block_offset
-                    slot_mapping_for_cur_seq = [slot]
+
+                    if getattr(self, 'speculative_config', None) is not None:
+                        slot_mapping_for_cur_seq = \
+                            self._get_slots_for_speculation(
+                            position, block_table,
+                            self.cache_config.block_size,
+                            self.speculative_config.num_speculative_tokens)
+                    else:
+                        slot_mapping_for_cur_seq = [slot]
                     slot_mapping.append(slot_mapping_for_cur_seq)
 
                     input_block_ids.append(seq_id)
@@ -345,17 +368,19 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         input_block_tables = torch.tensor(input_block_tables,
                                           dtype=torch.long,
                                           device=self.device)
-        
-        computed_context_lens_list = [length - 1 for length in full_context_lens]
+
+        computed_context_lens_list = [
+            length - 1 for length in full_context_lens
+        ]
 
         full_context_lens = torch.tensor(full_context_lens,
+                                         dtype=torch.long,
+                                         device=self.device).reshape(-1, 1)
+        # Convert computed_context_lens to tensor
+        computed_context_lens = torch.tensor(computed_context_lens_list,
                                              dtype=torch.long,
                                              device=self.device).reshape(
                                                  -1, 1)
-        # Convert computed_context_lens to tensor
-        computed_context_lens = torch.tensor(computed_context_lens_list,
-                                            dtype=torch.long,
-                                            device=self.device).reshape(-1, 1)
 
         return (request_ids, input_tokens, input_positions, input_block_ids,
                 slot_mapping, input_block_tables, full_context_lens,

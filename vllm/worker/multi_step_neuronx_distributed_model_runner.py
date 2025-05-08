@@ -77,6 +77,10 @@ class MultiStepNeuronxDistributedModelRunner(NeuronxDistributedModelRunner):
                 positions=model_input.input_positions,
                 input_block_ids=model_input.input_block_ids,
                 sampling_params=sampling_params,
+                slot_mapping=model_input.slot_mapping,
+                input_block_tables=model_input.input_block_tables,
+                full_context_lens=model_input.full_context_lens,
+                computed_context_lens=model_input.computed_context_lens,
                 **MultiModalKwargs.as_kwargs(model_input.multi_modal_kwargs
                                              or {},
                                              device=self.device),
