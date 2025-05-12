@@ -64,6 +64,9 @@ _NEURON_SUPPORTED_MODELS: dict[str, tuple[str, str]] = {
     "MllamaForConditionalGeneration":
     ("neuronx_distributed_inference.models.mllama.modeling_mllama",
      "NeuronMllamaForCausalLM"),
+    "Qwen2ForCausalLM":
+    ("neuronx_distributed_inference.models.qwen2.modeling_qwen2",
+     "NeuronQwen2ForCausalLM"),
 }
 
 
