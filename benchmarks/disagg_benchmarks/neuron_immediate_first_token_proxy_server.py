@@ -19,9 +19,9 @@ import aiohttp  # isort: skip
 A Proxy Server for Disaggregated Inference that has the following features
 1. Immediate return of token(s) from prefill server
 2. Handles both streaming and non-streaming use cases
-3. Forwards requests to both prefill and decode immediately before processing 
+3. Forwards requests to both prefill and decode immediately before processing
    prefill output
-4. Makes responses from the prefill and decode server appear as if they are 
+4. Makes responses from the prefill and decode server appear as if they are
    coming from a single server
 '''
 
@@ -36,12 +36,13 @@ AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=6 * 60 * 60)
 app = Quart(__name__)
 
 
-async def forward_request(url, data, request_type="unknown"):
+async def forward_request(url, data, request_id, request_type="unknown"):
     logger.debug("Starting %s request to %s", request_type, url)
     try:
         async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
             headers = {
-                "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"
+                "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
+                "X-Request-Id": f"{request_id}",
             }
             logger.debug("%s request attempting connection", request_type)
             try:
@@ -125,19 +126,29 @@ async def handle_request():
     prefill_request = original_request_data.copy()
     # Prefill server returns only the first token
     prefill_request['max_tokens'] = 1
-    # make your own id to make it appear that prefill and decode
-    # servers are streaming outputs for the same request
-    request_id = f"cmpl-{uuid.uuid4()}"
+
+    prefill_ip = app.args.prefill_ip
+    prefill_port = app.args.prefill_port
+    decode_ip = app.args.decode_ip
+    decode_port = app.args.decode_port
+    uid = uuid.uuid4()
+    prefill_request_id = f"cmpl-{uid}"
+    decode_request_id = f"cmpl-{uid}"
 
     async def streaming_responses(original_request_data, prefill_request):
         try:
-            prefill_url = f"http://{app.args.prefill_ip}:{app.args.prefill_port}{endpoint}"
-            decode_url = f"http://{app.args.decode_ip}:{app.args.decode_port}{endpoint}"
+            prefill_url = f"http://{prefill_ip}:{prefill_port}{endpoint}"
+            decode_url = f"http://{decode_ip}:{decode_port}{endpoint}"
 
+            logger.info("Routing prefill request %s to %s", prefill_request_id,
+                        prefill_url)
             prefill_response = forward_request(prefill_url, prefill_request,
-                                               "prefill")
+                                               prefill_request_id, "prefill")
+            logger.info("Routing decode request %s to %s", decode_request_id,
+                        decode_url)
             decode_response = forward_request(decode_url,
-                                              original_request_data, "decode")
+                                              original_request_data,
+                                              decode_request_id, "decode")
 
             prefill_task = asyncio.create_task(anext(prefill_response))
             decode_task = asyncio.create_task(anext(decode_response))
@@ -145,14 +156,14 @@ async def handle_request():
             await prefill_task
             async for chunk in handle_prefill_response(prefill_response,
                                                        streaming, endpoint,
-                                                       request_id,
+                                                       prefill_request_id,
                                                        request_time):
                 yield chunk
 
             await decode_task
             async for chunk in handle_decode_response(decode_response,
                                                       streaming, endpoint,
-                                                      request_id,
+                                                      decode_request_id,
                                                       request_time):
                 yield chunk
 
