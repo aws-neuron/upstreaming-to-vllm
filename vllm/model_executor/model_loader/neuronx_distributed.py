@@ -557,6 +557,7 @@ def _get_default_neuron_config(model_config: ModelConfig,
         torch_dtype=TORCH_DTYPE_TO_NEURON_AMP[model_config.dtype],
         padding_side="right",
         on_device_sampling_config=on_device_sampling_config,
+        sequence_parallel_enabled=True,
         lora_config=lora_serving_config)
     return neuron_config
 
