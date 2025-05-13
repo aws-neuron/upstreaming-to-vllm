@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
+import copy
 import os
 from unittest.mock import MagicMock
+
+import pytest
 
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import EngineArgs
@@ -20,6 +23,7 @@ def _create_neuron_model_runner(model: str, *args,
     vllm_config = VllmConfig(
         model_config=engine_config.model_config,
         parallel_config=engine_config.parallel_config,
+        cache_config=engine_config.cache_config,
         scheduler_config=engine_config.scheduler_config,
         device_config=engine_config.device_config,
     )
@@ -123,3 +127,215 @@ def test_update_neuron_sampling_params_full_batch():
         assert neuron_sampling_params.top_p == [0.2, 0.5]
         model_mock.model.update_generation_config.assert_called_once_with(
             neuron_sampling_params)
+
+
+def test_req_id_to_neuron_seq_id_mapping_for_prefill_without_finished():
+    model_runner = _create_neuron_model_runner(
+        "facebook/opt-125m",
+        seed=0,
+        dtype="float16",
+        max_num_seqs=4,
+        block_size=16,
+    )
+
+    model_runner.is_prefix_caching = True
+    prior_free_seq_ids = copy.copy(model_runner.free_seq_ids)
+
+    model_mock = MagicMock()
+    model_runner.model = model_mock
+
+    # 3 context encoding requests
+    seq_group_metadata_list = [
+        SequenceGroupMetadata(request_id="test_0",
+                              is_prompt=True,
+                              seq_data={0: SequenceData.from_seqs([1, 2, 3])},
+                              sampling_params=SamplingParams(temperature=0.5,
+                                                             top_k=1,
+                                                             top_p=0.5),
+                              block_tables={0: [10]},
+                              computed_block_nums=[]),
+        SequenceGroupMetadata(request_id="test_1",
+                              is_prompt=True,
+                              seq_data={1: SequenceData.from_seqs([4, 5, 6])},
+                              sampling_params=SamplingParams(temperature=0.2,
+                                                             top_k=2,
+                                                             top_p=0.2),
+                              block_tables={1: [11]},
+                              computed_block_nums=[]),
+        SequenceGroupMetadata(request_id="test_2",
+                              is_prompt=True,
+                              seq_data={2: SequenceData.from_seqs([4, 5, 6])},
+                              sampling_params=SamplingParams(temperature=0.2,
+                                                             top_k=2,
+                                                             top_p=0.2),
+                              block_tables={2: [12]},
+                              computed_block_nums=[])
+    ]
+
+    model_runner.prepare_model_input(seq_group_metadata_list,
+                                     finished_requests_ids=None)
+
+    for seq_grp_metadata in seq_group_metadata_list:
+        assert seq_grp_metadata.request_id in \
+        model_runner.vllm_req_to_neuron_seq_id_mapping
+    active_allocated_seq_ids = set(
+        model_runner.vllm_req_to_neuron_seq_id_mapping[
+            seq_grp_metadata.request_id]
+        for seq_grp_metadata in seq_group_metadata_list)
+    assert len(seq_group_metadata_list) == len(active_allocated_seq_ids)
+    assert len(prior_free_seq_ids) == len(active_allocated_seq_ids) + len(
+        model_runner.free_seq_ids)
+    assert prior_free_seq_ids == set(
+        model_runner.vllm_req_to_neuron_seq_id_mapping[
+            seq_grp_metadata.request_id] for seq_grp_metadata in
+        seq_group_metadata_list) | model_runner.free_seq_ids
+
+
+def test_req_id_to_neuron_seq_id_mapping_for_prefill_with_finished():
+    model_runner = _create_neuron_model_runner(
+        "facebook/opt-125m",
+        seed=0,
+        dtype="float16",
+        max_num_seqs=4,
+        block_size=16,
+    )
+
+    model_runner.is_prefix_caching = True
+    prior_free_seq_ids = copy.copy(model_runner.free_seq_ids)
+
+    model_mock = MagicMock()
+    model_runner.model = model_mock
+
+    # 1 context encoding request that will be finished in subsequent request.
+    seq_group_metadata_list = [
+        SequenceGroupMetadata(request_id="test_0",
+                              is_prompt=True,
+                              seq_data={0: SequenceData.from_seqs([1, 2, 3])},
+                              sampling_params=SamplingParams(temperature=0.5,
+                                                             top_k=1,
+                                                             top_p=0.5),
+                              block_tables={0: [10]},
+                              computed_block_nums=[])
+    ]
+    model_runner.prepare_model_input(seq_group_metadata_list,
+                                     finished_requests_ids=None)
+    # 3 context encoding requests with test_0 marked as finished.
+    seq_group_metadata_list = [
+        SequenceGroupMetadata(request_id="test_1",
+                              is_prompt=True,
+                              seq_data={1: SequenceData.from_seqs([4, 5, 6])},
+                              sampling_params=SamplingParams(temperature=0.2,
+                                                             top_k=2,
+                                                             top_p=0.2),
+                              block_tables={1: [11]},
+                              computed_block_nums=[]),
+        SequenceGroupMetadata(request_id="test_2",
+                              is_prompt=True,
+                              seq_data={2: SequenceData.from_seqs([7, 8, 9])},
+                              sampling_params=SamplingParams(temperature=0.2,
+                                                             top_k=2,
+                                                             top_p=0.2),
+                              block_tables={2: [12]},
+                              computed_block_nums=[]),
+        SequenceGroupMetadata(
+            request_id="test_3",
+            is_prompt=True,
+            seq_data={3: SequenceData.from_seqs([10, 11, 12])},
+            sampling_params=SamplingParams(temperature=0.5, top_k=1,
+                                           top_p=0.5),
+            block_tables={3: [13]},
+            computed_block_nums=[]),
+        SequenceGroupMetadata(
+            request_id="test_4",
+            is_prompt=True,
+            seq_data={4: SequenceData.from_seqs([13, 14, 15])},
+            sampling_params=SamplingParams(temperature=0.5, top_k=1,
+                                           top_p=0.5),
+            block_tables={4: [14]},
+            computed_block_nums=[]),
+    ]
+
+    model_runner.prepare_model_input(seq_group_metadata_list,
+                                     finished_requests_ids=['test_0'])
+
+    for seq_grp_metadata in seq_group_metadata_list:
+        assert seq_grp_metadata.request_id in \
+            model_runner.vllm_req_to_neuron_seq_id_mapping
+    active_allocated_seq_ids = set(
+        model_runner.vllm_req_to_neuron_seq_id_mapping[
+            seq_grp_metadata.request_id]
+        for seq_grp_metadata in seq_group_metadata_list)
+    assert len(seq_group_metadata_list) == len(active_allocated_seq_ids)
+    assert len(prior_free_seq_ids) == len(active_allocated_seq_ids) + len(
+        model_runner.free_seq_ids)
+    assert prior_free_seq_ids == set(
+        model_runner.vllm_req_to_neuron_seq_id_mapping[
+            seq_grp_metadata.request_id] for seq_grp_metadata in
+        seq_group_metadata_list) | model_runner.free_seq_ids
+
+
+def test_req_id_to_neuron_seq_id_mapping_for_prefill_with_overflow():
+    model_runner = _create_neuron_model_runner(
+        "facebook/opt-125m",
+        seed=0,
+        dtype="float16",
+        max_num_seqs=4,
+        block_size=16,
+    )
+
+    model_runner.is_prefix_caching = True
+
+    model_mock = MagicMock()
+    model_runner.model = model_mock
+
+    # 1 context encoding request that will be finished in subsequent request.
+    seq_group_metadata_list = [
+        SequenceGroupMetadata(request_id="test_0",
+                              is_prompt=True,
+                              seq_data={0: SequenceData.from_seqs([1, 2, 3])},
+                              sampling_params=SamplingParams(temperature=0.5,
+                                                             top_k=1,
+                                                             top_p=0.5),
+                              block_tables={0: [10]},
+                              computed_block_nums=[])
+    ]
+    model_runner.prepare_model_input(seq_group_metadata_list,
+                                     finished_requests_ids=None)
+    # 3 context encoding requests with test_0 marked as finished.
+    seq_group_metadata_list = [
+        SequenceGroupMetadata(request_id="test_1",
+                              is_prompt=True,
+                              seq_data={1: SequenceData.from_seqs([4, 5, 6])},
+                              sampling_params=SamplingParams(temperature=0.2,
+                                                             top_k=2,
+                                                             top_p=0.2),
+                              block_tables={1: [11]},
+                              computed_block_nums=[]),
+        SequenceGroupMetadata(request_id="test_2",
+                              is_prompt=True,
+                              seq_data={2: SequenceData.from_seqs([7, 8, 9])},
+                              sampling_params=SamplingParams(temperature=0.2,
+                                                             top_k=2,
+                                                             top_p=0.2),
+                              block_tables={2: [12]},
+                              computed_block_nums=[]),
+        SequenceGroupMetadata(
+            request_id="test_3",
+            is_prompt=True,
+            seq_data={3: SequenceData.from_seqs([10, 11, 12])},
+            sampling_params=SamplingParams(temperature=0.5, top_k=1,
+                                           top_p=0.5),
+            block_tables={3: [13]},
+            computed_block_nums=[]),
+        SequenceGroupMetadata(
+            request_id="test_4",
+            is_prompt=True,
+            seq_data={4: SequenceData.from_seqs([13, 14, 15])},
+            sampling_params=SamplingParams(temperature=0.5, top_k=1,
+                                           top_p=0.5),
+            block_tables={4: [14]},
+            computed_block_nums=[]),
+    ]
+    with pytest.raises(AssertionError):
+        model_runner.prepare_model_input(seq_group_metadata_list,
+                                         finished_requests_ids=None)
