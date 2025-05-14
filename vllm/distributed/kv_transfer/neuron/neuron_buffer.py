@@ -52,6 +52,13 @@ class NeuronBuffer:
             response = self.socket.recv_string()
             logger.info("Get handshake msg %s from server", response)
 
+        visible_core_count = torch.classes.neuron.Runtime(
+        ).get_visible_nc_count()
+        logger.info("Initializing async send recv on %s cores",
+                    visible_core_count)
+        for i in range(visible_core_count):
+            torch.ops.neuron._nrt_async_init_neuron(i)
+
         # Try to load kv_map_path from kv_transfer_config if specified
         # and also exchange KV maps
         if kv_map_path:
@@ -82,7 +89,32 @@ class NeuronBuffer:
         self.lookup_dict = {}
         self.lookup_queue: queue.Queue = queue.Queue()
 
-        self.transfer_engine = NeuronTransferEngine(remote_ip)
+        # make device to communicator map given scheme
+        # for now just one to one
+        device_to_communicator_map = {}
+        if send:
+            comm_create_func = torch.ops.neuron._nrt_create_send_communicator
+        else:
+            comm_create_func = torch.ops.neuron._nrt_create_recv_communicator
+
+        # TODO support mapping when producer and consumer kv map are not None
+        for i in range(visible_core_count):
+            device_to_communicator_map[i] = comm_create_func(remote_ip, i, i)
+
+        for i, comm in device_to_communicator_map.items():
+            iters = 0
+            sleep_time = 0.1
+            while True:
+                if iters * sleep_time == 60:
+                    raise TimeoutError(
+                        "Communicator establishment timed out after 1 minute.")
+                time.sleep(sleep_time)
+                if torch.ops.neuron._nrt_test_communicator(comm):
+                    break
+                iters += 1
+
+        self.transfer_engine = NeuronTransferEngine(
+            remote_ip, visible_core_count * 128, device_to_communicator_map)
 
         # TODO: capture thread error and clean up buffer properly
         if send:
