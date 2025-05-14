@@ -97,7 +97,7 @@ async def handle_decode_response(decode_response, streaming, endpoint,
     # Handle decode request
     # decode_url = f"http://{app.args.decode_ip}:{app.args.decode_port}{endpoint}"
     logger.debug("Request at %s: Starting decode", request_time)
-    seen_indices = set()
+    seen_indices: set[str] = set()
     async for chunk in decode_response:
         if chunk and streaming:
             index = read_key_from_data_string(chunk, "index")
@@ -280,7 +280,7 @@ def enable_debug_logging():
     logger.setLevel(logging.DEBUG)
 
 
-if __name__ == '__main__':
+def main():
     # Uncomment the next line to enable debug logging
     # enable_debug_logging()
     parser = argparse.ArgumentParser(
@@ -306,3 +306,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
     app.args = args
     app.run(port=8000)
+
+
+if __name__ == '__main__':
+    main()

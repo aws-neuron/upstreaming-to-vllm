@@ -670,6 +670,7 @@ setup(
     entry_points={
         "console_scripts": [
             "vllm=vllm.scripts:main",
+            "neuron-proxy-server=vllm.neuron_immediate_first_token_proxy_server:main"
         ],
     },
 )
