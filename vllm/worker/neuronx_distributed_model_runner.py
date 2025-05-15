@@ -115,9 +115,6 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
             top_p=top_p,
             temperature=temperature)
 
-        # TODO: support different sampling params for chunked prefill
-        if self.is_chunked_prefill:
-            sampling_params = sampling_params[:1, :]
         return sampling_params
 
     @torch.inference_mode()
