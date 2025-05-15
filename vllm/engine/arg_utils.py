@@ -1209,9 +1209,20 @@ class EngineArgs:
         # if we are using speculative decoding or multi-step
         num_lookahead_slots = max(self.num_lookahead_slots,
                                   self.num_scheduler_steps - 1)
+
+        # max() added to distinguish num_speculative_tokens
+        # from num_lookahead_slots.
         num_lookahead_slots = num_lookahead_slots \
             if speculative_config is None \
-            else speculative_config.num_lookahead_slots
+            else max(num_lookahead_slots,
+                     speculative_config.num_lookahead_slots)
+
+        if self._is_async_enabled() and speculative_config is None:
+            num_lookahead_slots = max(2, num_lookahead_slots)
+        elif self._is_async_enabled() and speculative_config is not None:
+            num_lookahead_slots = max(
+                num_lookahead_slots,
+                speculative_config.num_lookahead_slots * 2)
 
         if not self.use_v2_block_manager:
             logger.warning(
@@ -1312,6 +1323,13 @@ class EngineArgs:
             return self.block_size
         else:
             return self.max_model_len
+
+    def _is_async_enabled(self) -> bool:
+        return self.device == "neuron" and \
+            hasattr(self, "override_neuron_config") \
+            and self.override_neuron_config is not None \
+            and self.override_neuron_config.get(
+                "async_mode", False)
 
     def _is_block_kv_layout_enabled(self) -> bool:
         if self.device != "neuron":

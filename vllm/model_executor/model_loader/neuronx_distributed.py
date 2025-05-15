@@ -142,6 +142,9 @@ class NeuronCausalLM(NeuronBase):
             sampling_params = torch.index_select(sampling_params, 0,
                                                  sorted_indices)
 
+        if input_ids.shape[0] != sampling_params.shape[0]:
+            sampling_params = sampling_params[:input_ids.shape[0]]
+
         output = self.model(input_ids,
                             attention_mask=None,
                             position_ids=positions,
