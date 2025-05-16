@@ -48,9 +48,6 @@ llm = LLM(
     # The device argument can be either unspecified for automated detection,
     # or explicitly assigned.
     device="neuron",
-    override_neuron_config={
-        "on_device_sampling_config": None,
-    },
 )
 
 # Generate texts from the prompts. The output is a list of RequestOutput objects
