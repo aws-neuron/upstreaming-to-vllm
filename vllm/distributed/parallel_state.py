@@ -920,6 +920,10 @@ def get_kv_transfer_group() -> kv_transfer.KVTransferAgent:
     return _KV_TRANSFER
 
 
+def has_kv_transfer_group() -> bool:
+    return _KV_TRANSFER is not None
+
+
 @contextmanager
 def graph_capture(device: torch.device):
     """

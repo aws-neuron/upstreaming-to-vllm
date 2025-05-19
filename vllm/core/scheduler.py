@@ -12,7 +12,7 @@ from typing import Set, Tuple, Union
 
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
-from vllm.distributed import get_kv_transfer_group
+from vllm.distributed import get_kv_transfer_group, has_kv_transfer_group
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.platforms import current_platform
@@ -973,14 +973,7 @@ class Scheduler:
             transfer_done = get_kv_transfer_group().check_transfer_done(
                 seq_group.request_id)
 
-            force_sync_recv = os.environ.get("DI_FORCE_SYNC_RECV", None)
-            if transfer_done or force_sync_recv == "1":
-
-                # when force_sync_recv, busy wait until the transfer is done
-                while not transfer_done:
-                    transfer_done = get_kv_transfer_group(
-                    ).check_transfer_done(seq_group.request_id)
-
+            if transfer_done:
                 transferring_seqs = seq_group.get_seqs(
                     status=SequenceStatus.TRANSFERRING)
                 assert len(transferring_seqs) == 1, (
@@ -1224,8 +1217,8 @@ class Scheduler:
 
         # If any requests are swapped, prioritized swapped requests.
         if not self.swapped:
-            if os.environ.get("ASYNC_DI", None) and get_kv_transfer_group(
-            ).config.kv_transfer_config.is_kv_consumer:
+            if has_kv_transfer_group() and \
+                get_kv_transfer_group().config.kv_transfer_config.is_kv_consumer:
 
                 ignored_seq_groups = self._schedule_waiting_to_transferring()
 
@@ -1237,12 +1230,6 @@ class Scheduler:
                 )
 
                 prefills.ignored_seq_groups = ignored_seq_groups
-
-                if os.environ.get("ASYNC_DI_OFFLINE_TEST", None):
-                    logger.debug(
-                        "sleep for 10s to ensure transfer can complete......")
-                    time.sleep(10)
-
             else:
                 prefills = self._schedule_prefills(budget,
                                                    curr_loras,
@@ -1611,7 +1598,8 @@ class Scheduler:
         self.cache_id = self.next_cache_id
 
         # free blocks that being transferred already
-        if os.environ.get("ASYNC_DI_PRODUCER", None) == "1":
+        if has_kv_transfer_group() and \
+            get_kv_transfer_group().config.kv_transfer_config.is_kv_producer:
             self.free_transferred_seq_groups()
 
         # Return results
@@ -1662,7 +1650,8 @@ class Scheduler:
             if not seq_group.is_finished():
                 remaining.append(seq_group)
             else:
-                if os.environ.get("ASYNC_DI_PRODUCER", None) == "1":
+                if  has_kv_transfer_group() and \
+                    get_kv_transfer_group().config.kv_transfer_config.is_kv_producer:
                     trasnfer_done = get_kv_transfer_group(
                     ).check_transfer_done(seq_group.request_id)
                     if not trasnfer_done:
