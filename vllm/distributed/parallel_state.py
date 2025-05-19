@@ -876,6 +876,10 @@ def get_pp_group() -> GroupCoordinator:
 get_pipeline_model_parallel_group = get_pp_group
 
 
+def has_kv_transfer_group() -> bool:
+    return _KV_TRANSFER is not None
+
+
 @contextmanager
 def graph_capture(device: torch.device):
     """
