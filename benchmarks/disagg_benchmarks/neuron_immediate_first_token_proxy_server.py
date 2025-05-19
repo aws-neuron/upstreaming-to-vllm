@@ -5,7 +5,6 @@ import asyncio
 import json
 import logging
 import os
-import threading
 import time
 import uuid
 from builtins import anext
@@ -35,94 +34,6 @@ logger.setLevel(logging.WARNING)
 AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=6 * 60 * 60)
 
 app = Quart(__name__)
-
-workers_lock = threading.RLock()
-prefill_workers = []  # [(ip, api_server_port)]
-decode_workers = []  # [(ip, api_server_port)]
-p_selector = 0
-d_selector = 0
-
-
-async def check_health(ip, port, timeout=5):
-    url = f"http://{ip}:{port}/health"
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.get(url, timeout=timeout) as response:
-                if response.status == 200:
-                    logger.debug("Service <%s:%s> is healthy", ip, port)
-                    return True
-                else:
-                    logger.warning(
-                        "Service <%s:%s> is not healthy. Status code: %s", ip,
-                        port, response.status)
-                    return False
-        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-            logger.warning("Error checking health on Service <%s:%s>: %s", ip,
-                           port, e)
-            return False
-
-
-def refresh_worker_status(etcd_addr):
-    import asyncio
-
-    import etcd3
-    host, port = etcd_addr.split(":")
-    etcd = etcd3.client(host=host, port=port)
-
-    async def check_workers_health(workers_to_check):
-        """Check health of multiple workers concurrently"""
-        tasks = []
-        for ip, port in workers_to_check:
-            tasks.append(check_health(ip, port))
-        results = await asyncio.gather(*tasks)
-        return [
-            worker for worker, is_healthy in zip(workers_to_check, results)
-            if is_healthy
-        ]
-
-    def run_async_health_checks(workers_to_check):
-        """Run async health checks in the current thread"""
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        healthy_workers = loop.run_until_complete(
-            check_workers_health(workers_to_check))
-        loop.close()
-        return healthy_workers
-
-    while True:
-        new_prefill_workers = []
-        new_decode_workers = []
-
-        # Collect workers from etcd
-        for value, meta in etcd.get_prefix("/workers/"):
-            role, kv_ip, api_port = meta.key.decode().replace("/workers/",
-                                                              "").split("/")
-            if role == "prefill":
-                new_prefill_workers.append((kv_ip, api_port))
-            else:
-                assert role == "decode"
-                new_decode_workers.append((kv_ip, api_port))
-
-        logger.debug(
-            "registered prefill workers: %s \n healthy decode workers: %s",
-            new_prefill_workers, new_decode_workers)
-
-        # Check health of all workers
-        healthy_prefill_workers = run_async_health_checks(new_prefill_workers)
-        healthy_decode_workers = run_async_health_checks(new_decode_workers)
-
-        # Update workers list with only healthy workers
-        with workers_lock:
-            prefill_workers.clear()
-            prefill_workers.extend(healthy_prefill_workers)
-            decode_workers.clear()
-            decode_workers.extend(healthy_decode_workers)
-
-        logger.debug(
-            "healthy prefill workers: %s \n healthy decode workers: %s",
-            healthy_prefill_workers, healthy_decode_workers)
-
-        time.sleep(3)
 
 
 async def forward_request(url, data, request_id, request_type="unknown"):
@@ -206,7 +117,6 @@ async def handle_decode_response(decode_response, streaming, endpoint,
 @app.route('/v1/completions', methods=['POST'])
 @app.route('/v1/chat/completions', methods=['POST'])
 async def handle_request():
-    global p_selector, d_selector, workers_lock
     endpoint = request.path
     request_time = str(time.time())
     logger.debug("Processing request at %s", request_time)
@@ -217,46 +127,13 @@ async def handle_request():
     # Prefill server returns only the first token
     prefill_request['max_tokens'] = 1
 
-    uid = f"{uuid.uuid4()}"
-    if app.args.etcd:
-        # dynamic mode
-        logger.info("running proxy for dynamic xPyD " \
-            "with ectd addr %s", app.args.etcd)
-        # 1. wait for workers to come alive to make a P/D pair
-        # TODO: add fallback support when there is only decode workers
-        ready = False
-        while not ready:
-            with workers_lock:
-                if len(prefill_workers) == 0 or len(decode_workers) == 0:
-                    logger.info(
-                        "No available prefill workers or decode workers,"
-                        "sleep and wait for 3s...")
-                else:
-                    ready = True
-            if not ready:
-                time.sleep(3)
-
-        # 2. round robin select prefill and decode server
-        with workers_lock:
-            p_selector %= len(prefill_workers)
-            d_selector %= len(decode_workers)
-
-            prefill_ip, prefill_port = prefill_workers[p_selector]
-            decode_ip, decode_port = decode_workers[d_selector]
-
-        prefill_request_id = f"cmpl-{uid}_{decode_ip}:{decode_port}"
-        decode_request_id = f"cmpl-{uid}_{prefill_ip}:{prefill_port}"
-
-        p_selector += 1
-        d_selector += 1
-    else:
-        # static 1p1d mode
-        prefill_ip = app.args.prefill_ip
-        prefill_port = app.args.prefill_port
-        decode_ip = app.args.decode_ip
-        decode_port = app.args.decode_port
-        prefill_request_id = f"cmpl-{uid}"
-        decode_request_id = f"cmpl-{uid}"
+    prefill_ip = app.args.prefill_ip
+    prefill_port = app.args.prefill_port
+    decode_ip = app.args.decode_ip
+    decode_port = app.args.decode_port
+    uid = uuid.uuid4()
+    prefill_request_id = f"cmpl-{uid}"
+    decode_request_id = f"cmpl-{uid}"
 
     async def streaming_responses(original_request_data, prefill_request):
         try:
@@ -279,12 +156,14 @@ async def handle_request():
             await prefill_task
             async for chunk in handle_prefill_response(prefill_response,
                                                        streaming, endpoint,
-                                                       uid, request_time):
+                                                       prefill_request_id,
+                                                       request_time):
                 yield chunk
 
             await decode_task
             async for chunk in handle_decode_response(decode_response,
-                                                      streaming, endpoint, uid,
+                                                      streaming, endpoint,
+                                                      decode_request_id,
                                                       request_time):
                 yield chunk
 
@@ -347,8 +226,8 @@ def replace_key_in_data_string(data_string, key_to_replace, new_value):
         return f"{prefix}{modified_json}{trailing_newline}"
     except json.JSONDecodeError as e:
         logger.debug(
-            "JSON decode error: %s, maybe because there is no JSON "
-            "in this string %s", e, data_string)
+            "JSON decode error: %s, may be because there is no JSON "
+            "in this string", e)
         return data_string  # Return original string if JSON parsing fails
 
 
@@ -391,8 +270,8 @@ def read_key_from_data_string(data_string, key_to_read):
         return result
     except json.JSONDecodeError as e:
         logger.debug(
-            "JSON decode error: %s, maybe because there is no JSON "
-            "in this string %s", e, json_string)
+            "JSON decode error: %s, may be because there is no JSON "
+            "in this string", e)
         return None  # Return None if JSON parsing fails
 
 
@@ -403,7 +282,7 @@ def enable_debug_logging():
 
 if __name__ == '__main__':
     # Uncomment the next line to enable debug logging
-    enable_debug_logging()
+    # enable_debug_logging()
     parser = argparse.ArgumentParser(
         description=
         'Proxy server for prefill and decode servers that immediately returns '
@@ -416,9 +295,6 @@ if __name__ == '__main__':
         '--decode-ip',
         default='localhost',
         help='IP address for decode server (default: localhost)')
-    parser.add_argument('--etcd',
-                        default=None,
-                        help='etcd host ip:port to enable dynamic routing')
     parser.add_argument('--prefill-port',
                         type=int,
                         default=8100,
@@ -427,11 +303,6 @@ if __name__ == '__main__':
                         type=int,
                         default=8200,
                         help='Port for decode server (default: 8200)')
-
     args = parser.parse_args()
     app.args = args
-    if args.etcd:
-        threading.Thread(target=refresh_worker_status,
-                         args=(args.etcd, ),
-                         daemon=True).start()
     app.run(port=8000)

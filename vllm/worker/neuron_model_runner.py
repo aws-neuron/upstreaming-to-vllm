@@ -417,8 +417,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         if finished_requests_ids and self.is_prefix_caching:
             for req_id in finished_requests_ids:
                 if req_id in self.vllm_req_to_neuron_seq_id_mapping:
-                    freed_slot = self.vllm_req_to_neuron_seq_id_mapping.pop(
-                        req_id)
+                    freed_slot = self.vllm_req_to_neuron_seq_id_mapping.pop(req_id)
                     self.free_seq_ids.add(freed_slot)
         # NOTE: We assume that all sequences in the group are all prompts or
         # all decodes.
