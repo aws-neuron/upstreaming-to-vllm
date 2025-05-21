@@ -339,3 +339,89 @@ def test_req_id_to_neuron_seq_id_mapping_for_prefill_with_overflow():
     with pytest.raises(AssertionError):
         model_runner.prepare_model_input(seq_group_metadata_list,
                                          finished_requests_ids=None)
+
+
+def test_block_table_padding_with_neuron_kernel_enabled():
+    model_runner = _create_neuron_model_runner(
+        "facebook/opt-125m",
+        seed=0,
+        dtype="float16",
+        max_num_seqs=1,
+        block_size=16,
+    )
+    model_runner.is_prefix_caching = True
+    model_runner.vllm_req_to_neuron_seq_id_mapping = {"test_0": 0}
+    model_mock = MagicMock()
+    model_runner.model = model_mock
+    model_runner.model.neuron_config.attn_tkg_nki_kernel_enabled = True
+    model_runner.model.neuron_config.attn_block_tkg_nki_kernel_enabled = True
+    seq_group_metadata_list = [
+        SequenceGroupMetadata(request_id="test_0",
+                              is_prompt=False,
+                              seq_data={0: SequenceData.from_seqs([1, 2, 3])},
+                              sampling_params=SamplingParams(temperature=0.5,
+                                                             top_k=1,
+                                                             top_p=0.5),
+                              block_tables={0: [10]},
+                              computed_block_nums=[])
+    ]
+    out = model_runner.prepare_model_input(seq_group_metadata_list,
+                                           finished_requests_ids=None)
+    assert out.input_block_tables[:, -1] == -1
+
+
+def test_block_table_padding_with_neuron_kernel_disabled():
+    model_runner = _create_neuron_model_runner(
+        "facebook/opt-125m",
+        seed=0,
+        dtype="float16",
+        max_num_seqs=1,
+        block_size=16,
+    )
+    model_runner.is_prefix_caching = True
+    model_runner.vllm_req_to_neuron_seq_id_mapping = {"test_0": 0}
+    model_mock = MagicMock()
+    model_runner.model = model_mock
+    model_runner.model.neuron_config.attn_tkg_nki_kernel_enabled = False
+    model_runner.model.neuron_config.attn_block_tkg_nki_kernel_enabled = False
+    seq_group_metadata_list = [
+        SequenceGroupMetadata(request_id="test_0",
+                              is_prompt=False,
+                              seq_data={0: SequenceData.from_seqs([1, 2, 3])},
+                              sampling_params=SamplingParams(temperature=0.5,
+                                                             top_k=1,
+                                                             top_p=0.5),
+                              block_tables={0: [10]},
+                              computed_block_nums=[])
+    ]
+    out = model_runner.prepare_model_input(seq_group_metadata_list,
+                                           finished_requests_ids=None)
+    assert out.input_block_tables[:, -1] == 0
+
+
+def test_block_table_padding_with_neuron_kernel_enabled_prefill():
+    model_runner = _create_neuron_model_runner(
+        "facebook/opt-125m",
+        seed=0,
+        dtype="float16",
+        max_num_seqs=1,
+        block_size=16,
+    )
+    model_runner.is_prefix_caching = True
+    model_mock = MagicMock()
+    model_runner.model = model_mock
+    model_runner.model.neuron_config.attn_tkg_nki_kernel_enabled = True
+    model_runner.model.neuron_config.attn_block_tkg_nki_kernel_enabled = True
+    seq_group_metadata_list = [
+        SequenceGroupMetadata(request_id="test_0",
+                              is_prompt=True,
+                              seq_data={0: SequenceData.from_seqs([1, 2, 3])},
+                              sampling_params=SamplingParams(temperature=0.5,
+                                                             top_k=1,
+                                                             top_p=0.5),
+                              block_tables={0: [10]},
+                              computed_block_nums=[])
+    ]
+    out = model_runner.prepare_model_input(seq_group_metadata_list,
+                                           finished_requests_ids=None)
+    assert out.input_block_tables[:, -1] == 0

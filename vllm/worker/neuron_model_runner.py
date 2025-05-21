@@ -337,7 +337,15 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                     assert req_id in self.vllm_req_to_neuron_seq_id_mapping, \
                         "Decode assigning new seq id which is unexpected!"
                     # pad the block_table to have the length of num_gpu_blocks
-                    padded_block_table = [self._BLOCK_TABLE_PAD
+                    attn_tkg_nki_kernel_enabled = (
+                        self.model.neuron_config.attn_tkg_nki_kernel_enabled
+                        or self.model.neuron_config.
+                        attn_block_tkg_nki_kernel_enabled)
+                    # Pad -1 to allow DMA skipping that is supported
+                    # by attention TKG kernel.
+                    block_table_padding = -1 if attn_tkg_nki_kernel_enabled \
+                                                else self._BLOCK_TABLE_PAD
+                    padded_block_table = [block_table_padding
                                           ] * max_blocks_per_seq
                     padded_block_table[:len(block_table)] = block_table[:]
                     input_block_tables.append(padded_block_table)
