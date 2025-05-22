@@ -14,43 +14,45 @@ logger = init_logger(__name__)
 
 class NeuronTransferEngine:
 
-    def __init__(self, remote_ip, batch_transfer_size,
-                 device_to_communicator_map):
-        self.remote_ip = remote_ip
-        self.batch_transfer_size = batch_transfer_size
+    def __init__(self,
+                 remote_ip,
+                 device_to_communicator_map,
+                 send,
+                 default_batch=64):
+        logger.info("Setting up Neuron Transfer Engine")
+        batch_transfer_size = int(
+            os.environ.get("BATCH_TRANSFER", default_batch))
+        self.engine = torch.classes.neuron.NeuronTransferEngine(
+            batch_transfer_size, remote_ip, send, True)
+        self.current_task_id = None
+        self.send = send
         self.device_to_communicator_map = device_to_communicator_map
+
+        self.local_devices = None
+        self.comm_ids = None
 
     def transfer_neuron_tensors(self,
                                 tensors,
                                 offsets,
                                 lengths,
                                 peer_devices,
-                                send=True):
-        logger.debug("Start %s %s tensors on Neuron",
-                     'sending' if send else 'recving', len(tensors))
-        i = 0
-        num_tensors = len(tensors)
+                                send=True,
+                                token=None):
         start_time = time.time()
+        # TODO: this assume the devices and commids are identitical
+        #   across sequences, which might not be true with data parallel
+        if self.local_devices is None:
+            self.local_devices = [tensor.device.index for tensor in tensors]
 
-        batch_transfer_size = int(
-            os.environ.get("BATCH_TRANSFER", self.batch_transfer_size))
-        devices = [tensor.device.index for tensor in tensors]
-        communicators = [self.device_to_communicator_map[d] for d in devices]
-        while i < num_tensors:
-            logger.debug("transfer with C++ batch")
-            start = i
-            end = min(i + batch_transfer_size, num_tensors)
-            s = time.time()
-            torch.ops.neuron._nrt_batch_transfer_use_comm(
-                tensors[start:end], offsets[start:end], lengths[start:end],
-                communicators[start:end], send)
-            _d = time.time() - s
-            _total_bytes = sum(lengths[start:end])
-            logger.debug("Transfer %s GB, taking %s ms, throughput: %s Gbps",
-                         _total_bytes / 1e9, _d * 1000,
-                         (_total_bytes / 1e9) / _d * 8)
-            i += batch_transfer_size
+        if self.comm_ids is None:
+            self.comm_ids = [
+                self.device_to_communicator_map[i] for i in self.local_devices
+            ]
+
+        self.engine.queue_transfer_with_token(tensors, offsets, lengths,
+                                              peer_devices, self.local_devices,
+                                              self.comm_ids, token)
         _duration = time.time() - start_time
         logger.debug("Finished %s %s tensors takes %s ms",
-                     'sending' if send else 'recving', len(tensors),
+                     'sending' if self.send else 'recving', len(tensors),
                      _duration * 1000)
