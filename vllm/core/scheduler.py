@@ -1636,7 +1636,7 @@ class Scheduler:
         remaining: Deque[SequenceGroup] = deque()
         for seq_group in self.transferring:
             transfer_done = get_kv_transfer_group().check_transfer_done(
-                seq_group.request_id)
+                seq_group.request_id, remove=True)
             if not transfer_done:
                 remaining.append(seq_group)
             else:

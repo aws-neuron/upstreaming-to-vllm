@@ -18,11 +18,12 @@ logger = init_logger(__name__)
 
 class LookupEntry:
 
-    def __init__(self, request_id, block_ids, output_token=None):
+    def __init__(self, request_id, block_ids, output_token=None, token=None):
         self.request_id = request_id
         self.output_token = output_token
         self.block_ids = block_ids
         self.transfer_done = False
+        self.token = token
 
 
 class NeuronBuffer:
@@ -52,13 +53,6 @@ class NeuronBuffer:
             response = self.socket.recv_string()
             logger.info("Get handshake msg %s from server", response)
 
-        visible_core_count = torch.classes.neuron.Runtime(
-        ).get_visible_nc_count()
-        logger.info("Initializing async send recv on %s cores",
-                    visible_core_count)
-        for i in range(visible_core_count):
-            torch.ops.neuron._nrt_async_init_neuron(i)
-
         # Try to load kv_map_path from kv_transfer_config if specified
         # and also exchange KV maps
         if kv_map_path:
@@ -85,10 +79,15 @@ class NeuronBuffer:
         self.consumer_kv_map = peer_kv_map if send else kv_map
         self.is_kv_producer = send
 
-        self.buffer_lock = threading.Lock()
         self.lookup_dict = {}
         self.lookup_queue: queue.Queue = queue.Queue()
 
+        visible_core_count = torch.classes.neuron.Runtime(
+        ).get_visible_nc_count()
+        logger.info("Initializing async send recv on %s cores",
+                    visible_core_count)
+        for i in range(visible_core_count):
+            torch.ops.neuron._nrt_async_init_neuron(i)
         # make device to communicator map given scheme
         # for now just one to one
         device_to_communicator_map = {}
@@ -112,9 +111,11 @@ class NeuronBuffer:
                 if torch.ops.neuron._nrt_test_communicator(comm):
                     break
                 iters += 1
-
         self.transfer_engine = NeuronTransferEngine(
-            remote_ip, visible_core_count * 128, device_to_communicator_map)
+            remote_ip,
+            device_to_communicator_map,
+            send,
+            default_batch=visible_core_count * 128)
 
         # TODO: capture thread error and clean up buffer properly
         if send:
@@ -164,23 +165,21 @@ class NeuronBuffer:
         return self.lookup_dict[request_id].output_token
 
     def check_transfer_done(self, request_id, remove=False):
-        if request_id not in self.lookup_dict:
-            return False
-
-        done = self.lookup_dict[request_id].transfer_done
-
+        token = self.lookup_dict[request_id].token
+        done = token.is_done()
         if remove and done:
-            with self.buffer_lock:
-                del self.lookup_dict[request_id]
+            del self.lookup_dict[request_id]
 
         return done
 
 #  =============== send buffer implementation ===========================
 
     def async_send_kv_caches(self, request_id, block_ids, output_tokens):
-        with self.buffer_lock:
-            self.lookup_dict[request_id] = LookupEntry(request_id, block_ids,
-                                                       output_tokens)
+        self.lookup_dict[request_id] = LookupEntry(
+            request_id,
+            block_ids,
+            output_tokens,
+            token=torch.classes.neuron.CompletionToken())
 
     def send_handler(self):
         logger.info("start send_handler thread")
@@ -192,12 +191,11 @@ class NeuronBuffer:
 
                 look_up_success = True
                 entry: Optional[LookupEntry] = None
-                with self.buffer_lock:
 
-                    if request_id in self.lookup_dict:
-                        entry = self.lookup_dict[request_id]
-                    else:
-                        look_up_success = False
+                if request_id in self.lookup_dict:
+                    entry = self.lookup_dict[request_id]
+                else:
+                    look_up_success = False
 
                 if not look_up_success:
                     self.socket.send_json({"success": False})
@@ -211,13 +209,14 @@ class NeuronBuffer:
 
                 kv_caches, offsets, lengths, peer_devices = \
                     self.generate_transfer_sequences(entry.block_ids)
+
                 self.transfer_engine.transfer_neuron_tensors(kv_caches,
                                                              offsets,
                                                              lengths,
                                                              peer_devices,
-                                                             send=True)
+                                                             send=True,
+                                                             token=entry.token)
 
-                entry.transfer_done = True
         except RuntimeError as e:
             if 'Connection closed by peer' not in str(e):
                 raise e
@@ -228,42 +227,39 @@ class NeuronBuffer:
 # =============== recv buffer implementation ================
 
     def async_recv_kv_caches(self, request_id, block_ids):
-        entry = LookupEntry(request_id, block_ids)
+        entry = LookupEntry(request_id,
+                            block_ids,
+                            token=torch.classes.neuron.CompletionToken())
         self.lookup_dict[request_id] = entry
         self.lookup_queue.put((request_id, entry))
 
     def recv_handler(self):
         try:
             while True:
-                try:
-                    request_id, entry = self.lookup_queue.get()
+                request_id, entry = self.lookup_queue.get()
 
-                    logger.debug("try lookup with request_id %s", request_id)
+                logger.debug("try lookup with request_id %s", request_id)
 
-                    self.socket.send_json({"request_id": request_id})
+                self.socket.send_json({"request_id": request_id})
 
-                    response = self.socket.recv_json()
+                response = self.socket.recv_json()
 
-                    if not response["success"]:
-                        self.lookup_queue.put((request_id, entry))
-                        continue
+                if not response["success"]:
+                    self.lookup_queue.put((request_id, entry))
+                    continue
 
-                    entry.output_token = torch.tensor(
-                        response["output_token"]).unsqueeze(0)
+                entry.output_token = torch.tensor(
+                    response["output_token"]).unsqueeze(0)
 
-                    kv_caches, offsets, lengths, peer_devices = \
-                        self.generate_transfer_sequences(entry.block_ids)
-                    self.transfer_engine.transfer_neuron_tensors(kv_caches,
-                                                                 offsets,
-                                                                 lengths,
-                                                                 peer_devices,
-                                                                 send=False)
+                kv_caches, offsets, lengths, peer_devices = \
+                    self.generate_transfer_sequences(entry.block_ids)
 
-                    entry.transfer_done = True
-                except queue.Empty:
-                    # sleep for 1 ms to avoid contention buffer_lock
-                    time.sleep(0.001)
-                    pass
+                self.transfer_engine.transfer_neuron_tensors(kv_caches,
+                                                             offsets,
+                                                             lengths,
+                                                             peer_devices,
+                                                             send=False,
+                                                             token=entry.token)
 
         except RuntimeError as e:
             if 'Connection closed by peer' not in str(e):
