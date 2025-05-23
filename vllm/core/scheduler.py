@@ -1603,6 +1603,7 @@ class Scheduler:
             # It assumes the scheduled_seq_groups is ordered by
             # prefill < decoding.
             if is_first_prefill or not self.scheduler_config.send_delta_data:
+                from vllm.platforms import current_platform
                 seq_group_metadata = SequenceGroupMetadata(
                     request_id=seq_group.request_id,
                     is_prompt=is_prompt,
@@ -1622,9 +1623,12 @@ class Scheduler:
                     # between engine and worker.
                     # the subsequent comms can still use delta, but
                     # `multi_modal_data` will be None.
-                    multi_modal_data=(seq_group.multi_modal_data
-                                      if scheduler_outputs.num_prefill_groups
-                                      > 0 else None),
+                    # However, we need `multi_modal_data` to always be present
+                    # for Neuron device
+                    multi_modal_data=(seq_group.multi_modal_data if
+                                      (scheduler_outputs.num_prefill_groups > 0
+                                       or current_platform.is_neuron()) else
+                                      None),
                     multi_modal_placeholders=(
                         seq_group.multi_modal_placeholders
                         if scheduler_outputs.num_prefill_groups > 0 else None),

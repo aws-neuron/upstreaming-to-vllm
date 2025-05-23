@@ -121,6 +121,14 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             num_lookahead_slots=num_lookahead_slots,
         )
 
+        from vllm.platforms import current_platform
+
+        # On Neuron, cross attention queries use the same memory allocations as
+        # the decoder sequence. Thus set encoder_seq = None to avoid
+        # redundant memory allocations.
+        if current_platform.is_neuron():
+            seq_group.encoder_seq = None
+
         if seq_group.is_encoder_decoder():
             encoder_seq = seq_group.get_encoder_seq()
             assert encoder_seq is not None
