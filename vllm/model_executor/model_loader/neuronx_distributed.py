@@ -30,7 +30,8 @@ from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, SpeculativeConfig)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import (Sampler, SamplerOutput,
+                                                SpecDecodeWorkerMetrics)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import (CompletionSequenceGroupOutput, Logprob,
                            SequenceOutput)
@@ -454,19 +455,15 @@ def compile_model(neuron_model, traced_model_path):
 class NeuronSpeculationCausalLM(NeuronBase):
     """A Neuron-optimized causal language model with speculative decoding."""
 
-    def __init__(
-        self,
-        config: PretrainedConfig,
-    ) -> None:
-        super().__init__()
-        self.config = config
-        self.logits_processor = LogitsProcessor(config.vocab_size,
-                                                logits_as_input=True)
-        # Lazy initialized
-        self.model: nn.Module
-        self.is_reorder_needed: bool = True
+    def __init__(self, config: PretrainedConfig, neuron_config):
+        super().__init__(config)
+        self.neuron_config = neuron_config
 
-        self.kv_caches: Optional[List[Any]] = None
+        # Speculation metrics
+        self.num_spec_tokens = neuron_config['speculation_length']
+        self.accepted_tokens = 0
+        self.draft_tokens = 0
+        self.emitted_tokens = 0
 
     def forward(
         self,
@@ -523,6 +520,12 @@ class NeuronSpeculationCausalLM(NeuronBase):
             accepted_tokens_with_padding = torch.index_select(
                 accepted_tokens_with_padding, 0, restored_indices)
 
+        # Update speculation metrics
+        self.accepted_tokens += (accepted_tokens_with_padding
+                                 != -1).sum().item()
+        self.draft_tokens += batch_size * steps
+        self.emitted_tokens += (generated_token_counts != 0).sum().item()
+
         return accepted_tokens_with_padding
 
     def sample(
@@ -557,6 +560,20 @@ class NeuronSpeculationCausalLM(NeuronBase):
                                                   prompt_logprobs=None))
             sampler_output_list.append(
                 SamplerOutput(outputs=step_output_token_ids))
+
+        if self.draft_tokens != 0:
+            sampler_output_list[0].spec_decode_worker_metrics = (
+                SpecDecodeWorkerMetrics(
+                    num_spec_tokens=self.num_spec_tokens,
+                    draft_acceptance_rate=self.accepted_tokens /
+                    self.draft_tokens,
+                    system_efficiency=self.emitted_tokens /
+                    ((self.draft_tokens // self.num_spec_tokens) *
+                     (self.num_spec_tokens + 1)),
+                    accepted_tokens=self.accepted_tokens,
+                    draft_tokens=self.draft_tokens,
+                    emitted_tokens=self.emitted_tokens))
+
         return sampler_output_list
 
     def load_weights(self, model_name_or_path: str,
@@ -791,7 +808,6 @@ def get_neuron_speculation_model(model_config: ModelConfig,
 
     This model handles speculation using both a draft model and an EAGLE draft.
     """
-    model = NeuronSpeculationCausalLM(model_config.hf_config)
     default_neuron_config_args = _get_default_speculation_config(
         model_config, cache_config, parallel_config, scheduler_config,
         speculation_config)
@@ -799,6 +815,7 @@ def get_neuron_speculation_model(model_config: ModelConfig,
         default_neuron_config_args, model_config.override_neuron_config)
     neuron_config = _validate_neuron_config(cache_config, scheduler_config,
                                             neuron_config)
+    model = NeuronSpeculationCausalLM(model_config.hf_config, neuron_config)
     override_neuron_config = model_config.override_neuron_config
     model.load_weights(model_config.model,
                        speculation_config.draft_model_config.model,
