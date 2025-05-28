@@ -38,6 +38,15 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
         self.model = None
         self.lora_serving_config = None
 
+        # Init attributes for features on block kv, and they will be
+        # overridden in self.load_model()
+        block_size = vllm_config.cache_config.block_size
+        max_model_len = vllm_config.scheduler_config.max_model_len
+        self.is_block_kv_layout = block_size != max_model_len
+        self.is_prefix_caching = False
+        self.is_chunked_prefill = False
+        self.use_custom_seq_id_mapping = False
+
     @staticmethod
     def _get_lora_paths_strings(lora_modules: List[LoRAModulePath]):
         if not lora_modules:
@@ -76,6 +85,8 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
         self.is_block_kv_layout = self.model.neuron_config.is_block_kv_layout
         self.is_prefix_caching = self.model.neuron_config.is_prefix_caching
         self.model.is_reorder_needed = not self.is_block_kv_layout
+        self.use_custom_seq_id_mapping = self.is_prefix_caching and \
+            self.model.neuron_config.enable_eagle_speculation
 
     def get_nxd_sampling_params(self, sampling_metadata):
         if self.model.config.neuron_config.on_device_sampling_config:
@@ -214,7 +225,7 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
         finished_requests_ids: Optional[List[str]] = None
     ) -> ModelInputForNeuron:
         # Free slots of finished requests
-        if finished_requests_ids and self.is_prefix_caching:
+        if finished_requests_ids and self.use_custom_seq_id_mapping:
             for req_id in finished_requests_ids:
                 if req_id in self.vllm_req_to_neuron_seq_id_mapping:
                     freed_slot = self.vllm_req_to_neuron_seq_id_mapping.pop(
