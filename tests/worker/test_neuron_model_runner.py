@@ -139,6 +139,7 @@ def test_req_id_to_neuron_seq_id_mapping_for_prefill_without_finished():
     )
 
     model_runner.is_prefix_caching = True
+    model_runner.use_custom_seq_id_mapping = True
     prior_free_seq_ids = copy.copy(model_runner.free_seq_ids)
 
     model_mock = MagicMock()
@@ -201,6 +202,7 @@ def test_req_id_to_neuron_seq_id_mapping_for_prefill_with_finished():
     )
 
     model_runner.is_prefix_caching = True
+    model_runner.use_custom_seq_id_mapping = True
     prior_free_seq_ids = copy.copy(model_runner.free_seq_ids)
 
     model_mock = MagicMock()
@@ -284,7 +286,7 @@ def test_req_id_to_neuron_seq_id_mapping_for_prefill_with_overflow():
     )
 
     model_runner.is_prefix_caching = True
-
+    model_runner.use_custom_seq_id_mapping = True
     model_mock = MagicMock()
     model_runner.model = model_mock
 
@@ -350,6 +352,7 @@ def test_block_table_padding_with_neuron_kernel_enabled():
         block_size=16,
     )
     model_runner.is_prefix_caching = True
+    model_runner.use_custom_seq_id_mapping = True
     model_runner.vllm_req_to_neuron_seq_id_mapping = {"test_0": 0}
     model_mock = MagicMock()
     model_runner.model = model_mock
@@ -379,6 +382,7 @@ def test_block_table_padding_with_neuron_kernel_disabled():
         block_size=16,
     )
     model_runner.is_prefix_caching = True
+    model_runner.use_custom_seq_id_mapping = True
     model_runner.vllm_req_to_neuron_seq_id_mapping = {"test_0": 0}
     model_mock = MagicMock()
     model_runner.model = model_mock
@@ -408,6 +412,7 @@ def test_block_table_padding_with_neuron_kernel_enabled_prefill():
         block_size=16,
     )
     model_runner.is_prefix_caching = True
+    model_runner.use_custom_seq_id_mapping = True
     model_mock = MagicMock()
     model_runner.model = model_mock
     model_runner.model.neuron_config.attn_tkg_nki_kernel_enabled = True
