@@ -1396,7 +1396,7 @@ class Scheduler:
         # If any requests are swapped, prioritized swapped requests.
         if not self.swapped:
             if has_kv_transfer_group() and \
-                get_kv_transfer_group().config.kv_transfer_config.is_kv_consumer:
+                get_kv_transfer_group().config.is_kv_consumer:
 
                 ignored_seq_groups = self._schedule_waiting_to_transferring()
 
@@ -1833,7 +1833,7 @@ class Scheduler:
 
         # free blocks that being transferred already
         if has_kv_transfer_group() and \
-            get_kv_transfer_group().config.kv_transfer_config.is_kv_producer:
+            get_kv_transfer_group().config.is_kv_producer:
             self.free_transferred_seq_groups()
 
         # Return results
@@ -1871,6 +1871,8 @@ class Scheduler:
         for seq_group in self.transferring:
             transfer_done = get_kv_transfer_group().check_transfer_done(
                 seq_group.request_id, remove=True)
+            logger.debug("Transfer done %s for request %s", transfer_done,
+                         seq_group.request_id)
             if not transfer_done:
                 remaining.append(seq_group)
             else:
@@ -1885,10 +1887,10 @@ class Scheduler:
                 remaining.append(seq_group)
             else:
                 if  has_kv_transfer_group() and \
-                    get_kv_transfer_group().config.kv_transfer_config.is_kv_producer:
-                    trasnfer_done = get_kv_transfer_group(
+                    get_kv_transfer_group().config.is_kv_producer:
+                    transfer_done = get_kv_transfer_group(
                     ).check_transfer_done(seq_group.request_id)
-                    if not trasnfer_done:
+                    if not transfer_done:
                         logger.debug(
                             "seq_group %s hasn't finished "
                             "transferring, will put into transfer "

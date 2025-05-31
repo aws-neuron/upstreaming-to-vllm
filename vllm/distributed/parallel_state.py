@@ -876,10 +876,6 @@ def get_pp_group() -> GroupCoordinator:
 get_pipeline_model_parallel_group = get_pp_group
 
 
-def has_kv_transfer_group() -> bool:
-    return _KV_TRANSFER is not None
-
-
 @contextmanager
 def graph_capture(device: torch.device):
     """
@@ -1070,18 +1066,6 @@ def initialize_model_parallel(
         "DP rank %s, PP rank %s, TP rank %s, EP rank %s", rank, world_size,
         _DP.rank_in_group, _PP.rank_in_group, _TP.rank_in_group,
         _EP.rank_in_group)
-    global _KV_TRANSFER
-
-    if vllm_config.kv_transfer_config is None:
-        return
-
-    if all([
-            vllm_config.kv_transfer_config.need_kv_parallel_group, _KV_TRANSFER
-            is None
-    ]):
-        _KV_TRANSFER = kv_transfer.KVTransferAgent(rank=0,
-                                                   local_rank=0,
-                                                   config=vllm_config)
 
 
 def ensure_model_parallel_initialized(

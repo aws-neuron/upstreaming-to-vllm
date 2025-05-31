@@ -3657,6 +3657,9 @@ class KVTransferConfig:
     kv_map_path: Optional[str] = None
     """Path to json file that defines mapping from cores to KV heads and seq_ids"""
 
+    neuron_core_offset: Optional[int] = 0
+    """Neuron core offset if logical core not equal to physical core"""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,

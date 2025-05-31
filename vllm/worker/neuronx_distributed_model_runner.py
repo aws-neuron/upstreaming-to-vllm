@@ -225,12 +225,12 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
         is_prompt = seq_group_metadata_list[0].is_prompt
         # Prepare input tensors.
         if is_prompt:
-            (input_tokens, input_positions, input_block_ids, slot_mapping,
+            (request_ids, input_tokens, input_positions, input_block_ids, slot_mapping,
              input_block_tables, full_context_lens, computed_context_lens,
              seq_lens, multi_modal_kwargs
              ) = self._prepare_prompt(seq_group_metadata_list)
         else:
-            (input_tokens, input_positions, input_block_ids,
+            (request_ids, input_tokens, input_positions, input_block_ids,
              slot_mapping, input_block_tables, full_context_lens,
              computed_context_lens
             ) = self._prepare_decode(seq_group_metadata_list)
