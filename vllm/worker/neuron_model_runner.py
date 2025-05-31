@@ -281,7 +281,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             device=self.device).reshape(-1, 1)
         multi_modal_kwargs = MultiModalKwargs.batch(multi_modal_kwargs_list)
 
-        return (input_tokens, input_positions, input_block_ids, slot_mapping,
+        return (request_ids, input_tokens, input_positions, input_block_ids, slot_mapping,
                 input_block_tables, full_context_lens, computed_context_lens,
                 seq_lens, multi_modal_kwargs)
 
@@ -404,7 +404,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         computed_context_lens = torch.tensor(computed_context_lens_list,
                                              dtype=torch.long,
                                              device=self.device).reshape(-1, 1)
-        return (input_tokens, input_positions, input_block_ids, slot_mapping,
+        return (request_ids, input_tokens, input_positions, input_block_ids, slot_mapping,
                input_block_tables, full_context_lens, computed_context_lens)
 
     def make_model_input_from_broadcasted_tensor_dict(
@@ -431,12 +431,12 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         is_prompt = seq_group_metadata_list[0].is_prompt
         # Prepare input tensors.
         if is_prompt:
-            (input_tokens, input_positions, input_block_ids, slot_mapping,
+            (request_ids, input_tokens, input_positions, input_block_ids, slot_mapping,
              input_block_tables, full_context_lens, seq_lens,
              multi_modal_kwargs
             ) = self._prepare_prompt(seq_group_metadata_list)
         else:
-            (input_tokens, input_positions, input_block_ids,
+            (request_ids, input_tokens, input_positions, input_block_ids,
              slot_mapping, input_block_tables, full_context_lens,
              computed_context_lens
             ) = self._prepare_decode(seq_group_metadata_list)
@@ -591,6 +591,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             logger.debug("bypass_model_exec: %s", bypass_model_exec)
 
             if not bypass_model_exec:
+                print(model_input)
                 hidden_states = self.model(
                     input_ids=model_input.input_tokens,
                     positions=model_input.input_positions,

@@ -36,6 +36,7 @@ class NeuronBuffer:
                  zmq_port,
                  kv_map_path,
                  is_block_kv_layout,
+                 nc_offset,
                  send=True):
         logger.info(
             "initialize %s buffer, " \
@@ -46,15 +47,25 @@ class NeuronBuffer:
         if send:
             self.socket = zmq_context.socket(zmq.REP)
             self.socket.bind(f"tcp://*:{zmq_port}")
+            # First handshake
             response = self.socket.recv_string()
             logger.info("Get handshake msg %s from client", response)
-            self.socket.send_json("hello from server")
+            self.socket.send_string("hello from server")
+            # Second exchange for nc_offset
+            peer_nc_offset = self.socket.recv_string()
+            logger.info("Get peer nc offset %s from client", peer_nc_offset)
+            self.socket.send_string(str(nc_offset))
         else:
             self.socket = zmq_context.socket(zmq.REQ)
             self.socket.connect(f"tcp://{zmq_ip}:{zmq_port}")
+            # First handshake
             self.socket.send_string("hello from client")
             response = self.socket.recv_string()
             logger.info("Get handshake msg %s from server", response)
+            # Second exchange for nc_offset
+            self.socket.send_string(str(nc_offset))
+            peer_nc_offset = self.socket.recv_string()
+            logger.info("Get peer nc offset %s from server", peer_nc_offset)
 
         # Try to load kv_map_path from kv_transfer_config if specified
         # and also exchange KV maps
@@ -85,12 +96,14 @@ class NeuronBuffer:
         self.lookup_dict = {}
         self.lookup_queue: queue.Queue = queue.Queue()
 
+        nc_offset = int(nc_offset)
+        peer_nc_offset = int(peer_nc_offset)
         visible_core_count = torch.classes.neuron.Runtime(
         ).get_visible_nc_count()
         logger.info("Initializing async send recv on %s cores",
                     visible_core_count)
         for i in range(visible_core_count):
-            torch.ops.neuron._nrt_async_init_neuron(i)
+            torch.ops.neuron._nrt_async_init_neuron(i + nc_offset)
         # make device to communicator map given scheme
         # for now just one to one
         device_to_communicator_map = {}
@@ -101,7 +114,8 @@ class NeuronBuffer:
 
         # TODO support mapping when producer and consumer kv map are not None
         for i in range(visible_core_count):
-            device_to_communicator_map[i] = comm_create_func(remote_ip, i, i)
+            device_to_communicator_map[i] = comm_create_func(
+                remote_ip, i + peer_nc_offset, i + nc_offset)
 
         for i, comm in device_to_communicator_map.items():
             iters = 0
@@ -114,20 +128,22 @@ class NeuronBuffer:
                 if torch.ops.neuron._nrt_test_communicator(comm):
                     break
                 iters += 1
+
         self.transfer_engine = NeuronTransferEngine(
             remote_ip,
             device_to_communicator_map,
             send,
+            nc_offset,
             default_batch=visible_core_count * 128)
 
         # TODO: capture thread error and clean up buffer properly
         if send:
             self.send_handler_thread = threading.Thread(
-                target=self.send_handler)
+                target=self.send_handler, daemon=True)
             self.send_handler_thread.start()
         else:
             self.recv_handler_thread = threading.Thread(
-                target=self.recv_handler)
+                target=self.recv_handler, daemon=True)
             self.recv_handler_thread.start()
 
         self.kv_caches = None

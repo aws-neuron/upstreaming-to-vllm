@@ -167,22 +167,21 @@ class NeuronWorker(LocalOrDistributedWorkerBase):
         vLLM still needs the environment initialized when TP/PP > 1
         """
         if self.vllm_config.kv_transfer_config:
-
             ensure_kv_transfer_initialized(self.vllm_config)
             get_kv_transfer_group().initialize_buffer()
             logger.info("initialized kv connector")
-        else:
-            init_distributed_environment(
-                world_size=1,
-                rank=self.rank,
-                local_rank=self.local_rank,
-                distributed_init_method=self.distributed_init_method,
-                backend="gloo",
-            )
-            ensure_model_parallel_initialized(
-                1,
-                1,
-            )
+
+        init_distributed_environment(
+            world_size=1,
+            rank=self.rank,
+            local_rank=self.local_rank,
+            distributed_init_method=self.distributed_init_method,
+            backend="gloo",
+        )
+        ensure_model_parallel_initialized(
+            1,
+            1,
+        )
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         if current_platform.use_transformers_neuronx():
