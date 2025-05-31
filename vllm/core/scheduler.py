@@ -1637,6 +1637,8 @@ class Scheduler:
         for seq_group in self.transferring:
             transfer_done = get_kv_transfer_group().check_transfer_done(
                 seq_group.request_id, remove=True)
+            logger.debug("Transfer done %s for request %s", transfer_done,
+                         seq_group.request_id)
             if not transfer_done:
                 remaining.append(seq_group)
             else:
@@ -1652,9 +1654,9 @@ class Scheduler:
             else:
                 if  has_kv_transfer_group() and \
                     get_kv_transfer_group().config.kv_transfer_config.is_kv_producer:
-                    trasnfer_done = get_kv_transfer_group(
+                    transfer_done = get_kv_transfer_group(
                     ).check_transfer_done(seq_group.request_id)
-                    if not trasnfer_done:
+                    if not transfer_done:
                         logger.debug(
                             "seq_group %s hasn't finished "
                             "transferring, will put into transfer "

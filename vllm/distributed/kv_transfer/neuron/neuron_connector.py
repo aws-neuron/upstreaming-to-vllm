@@ -43,6 +43,7 @@ class NeuronConnector(KVConnectorBase):
                                        self.config.kv_port,
                                        self.config.kv_map_path,
                                        self.is_block_kv_layout,
+                                       self.config.neuron_core_offset,
                                        send=True)
         else:
             self.buffer = NeuronBuffer(self.zmq_context,
@@ -51,6 +52,7 @@ class NeuronConnector(KVConnectorBase):
                                        self.config.kv_port,
                                        self.config.kv_map_path,
                                        self.is_block_kv_layout,
+                                       self.config.neuron_core_offset,
                                        send=False)
 
     def close(self):

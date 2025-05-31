@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import os
 from typing import List
 
 from vllm.config import SchedulerConfig
 from vllm.core.scheduler import Scheduler
+from vllm.distributed import get_kv_transfer_group, has_kv_transfer_group
 from vllm.engine.output_processor.interfaces import (
     SequenceGroupOutputProcessor)
 from vllm.engine.output_processor.stop_checker import StopChecker
@@ -132,7 +132,10 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
             sampling_params,
             lora_req=seq_group.lora_request,
         )
-        if (os.environ.get("ASYNC_DI_PRODUCER", None) != "1"
-                and seq.is_finished()):
+        if has_kv_transfer_group() and \
+            get_kv_transfer_group().config.kv_transfer_config.is_kv_producer:
+            return
+
+        if seq.is_finished():
             for scheduler in self.scheduler:
                 scheduler.free_seq(seq)

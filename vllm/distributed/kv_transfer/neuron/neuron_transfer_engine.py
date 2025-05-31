@@ -18,12 +18,13 @@ class NeuronTransferEngine:
                  remote_ip,
                  device_to_communicator_map,
                  send,
+                 nc_offset,
                  default_batch=64):
         logger.info("Setting up Neuron Transfer Engine")
         batch_transfer_size = int(
             os.environ.get("BATCH_TRANSFER", default_batch))
         self.engine = torch.classes.neuron.NeuronTransferEngine(
-            batch_transfer_size, remote_ip, send, True)
+            batch_transfer_size, remote_ip, send, True, nc_offset)
         self.current_task_id = None
         self.send = send
         self.device_to_communicator_map = device_to_communicator_map
