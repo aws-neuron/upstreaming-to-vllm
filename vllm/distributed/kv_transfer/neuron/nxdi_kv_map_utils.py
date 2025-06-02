@@ -419,12 +419,57 @@ def generate_kv_transfer_sequences_different_sharding(kv_caches, max_num_seqs,
     return transfer_sequences
 
 
+def generate_kv_transfer_sequences_identical_sharding_block_kv(
+        kv_caches, block_ids):
+    """
+    transfer scheme that support only same sharding
+    and blockwise KV cache layout
+    
+    Returns: transfer_sequences which is a mapping from seq_id to 
+    (tensors, offsets, lengths, peer_devices)
+    """
+    # TODO we can define a new data class for transfer sequences
+    tensors = []
+    peer_devices = []
+    lengths = []
+    offsets = []
+
+    # Each sequence often occupies multiple kv cache blocks, which means each kv
+    # cache tensor needs to be accessed multiple times in different offsets for
+    # transferring the KV cache of a sequence. This is the reason why we have
+    # block_ids in the outer for loop.
+    for block_id in block_ids:
+        for tensor in kv_caches:
+            tensors.append(tensor)
+            peer_devices.append(tensor.device.index)
+            length = math.prod(list(tensor.shape[1:])) * tensor.element_size()
+            offset = length * block_id
+            lengths.append(length)
+            offsets.append(offset)
+
+    return tensors, offsets, lengths, peer_devices
+
+
+def generate_kv_transfer_sequences_different_sharding_block_kv(
+        kv_caches, max_num_seqs):
+    """
+    transfer scheme that support different sharding
+    and blockwise KV cache layout
+    """
+    raise NotImplementedError(
+        "Blockwise KV cache for different sharding is not supported")
+
+
 def setup_transfer_scheme(kv_caches: List, producer_kv_map: Optional[Dict],
                           consumer_kv_map: Optional[Dict], max_num_seqs: int,
                           is_producer: bool):
     """
     Set up KV transfer scheme based on KV maps on prefill and decode.
     This is used to support different sharding strategies.
+    
+    returns:
+        transfer_sequences: mapping from seq_id to the transfer sequence which 
+        is a list of (tensors, offsets, lengths, peer_devices).
 
     Currently we generate a mapping from seq_id to the transfer sequence which 
     is a list of (tensors, offsets, lengths, peer_devices). 
