@@ -212,7 +212,8 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                         )
                     assert self.free_seq_ids, "No free sequence ID available!"
                     assigned_slot = self.free_seq_ids.pop()
-                    self.vllm_req_to_neuron_seq_id_mapping[req_id] = assigned_slot
+                    self.vllm_req_to_neuron_seq_id_mapping[
+                        req_id] = assigned_slot
 
                 # pad the block_table to have the length of num_gpu_blocks
                 padded_block_table = [self._BLOCK_TABLE_PAD
@@ -344,7 +345,8 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                             self.vllm_req_to_neuron_seq_id_mapping, \
                             (
                                 "The request ID for the current decode request "
-                                " is not found in request to sequence ID mapping"
+                                " is not found in request to sequence ID "
+                                "mapping"
                             )
                     # pad the block_table to have the length of num_gpu_blocks
                     attn_tkg_nki_kernel_enabled = (

@@ -10,6 +10,7 @@ import zmq
 from vllm.distributed.kv_transfer.neuron.neuron_transfer_engine import (
     NeuronTransferEngine)
 from vllm.distributed.kv_transfer.neuron.nxdi_kv_map_utils import (
+    generate_kv_transfer_sequences_identical_sharding_block_kv,
     setup_transfer_scheme, validate_and_load_kv_map)
 from vllm.logger import init_logger
 
@@ -34,12 +35,14 @@ class NeuronBuffer:
                  zmq_ip,
                  zmq_port,
                  kv_map_path,
+                 is_block_kv_layout,
                  send=True):
         logger.info(
             "initialize %s buffer, " \
             "with server zmq %s:%s, transfer to remote_ip %s ",
             'send' if send else 'recv', zmq_ip, zmq_port, remote_ip,
         )
+        self.is_block_kv_layout = is_block_kv_layout
         if send:
             self.socket = zmq_context.socket(zmq.REP)
             self.socket.bind(f"tcp://*:{zmq_port}")
@@ -151,12 +154,31 @@ class NeuronBuffer:
 
     def generate_transfer_sequences(self, block_ids):
         """
-        return pre-generated transfer sequence by indexing with seq_id
+        return generated transfer sequence by indexing with seq_id.
+        
+        for contiguous kv cache layout, the transfer sequence can be 
+        pre-calculated.
 
-        TODO: modify once we support block-wise kv cache
+        for blockwise kv cache layout, the transfer sequence (particularly 
+        offsets) needs to be generated based on the block ids of each sequence.
+        Node the offsets can be different between the prefill node and the 
+        decodenode for the same sequence, depending on what physical blocks 
+        are allocated for the sequence on the two nodes.
+
+        returns
+            kv_caches: list of KV cache tensors
+            offsets: list of ints, offset of data to transfer in each KV cache
+            lengths: list of ints, length of data to transfer in each KV cache
+            peer_devices: list of ints, peer device index
         """
-        seq_id = block_ids[0]
-        return self.transfer_sequences[seq_id]
+        logger.debug("generate_transfer_sequences with block_ids %s",
+                     block_ids)
+        if self.is_block_kv_layout:
+            return generate_kv_transfer_sequences_identical_sharding_block_kv(
+                self.kv_caches, block_ids)
+        else:
+            seq_id = block_ids[0]
+            return self.transfer_sequences[seq_id]
 
     def get_output_token(self, request_id):
         assert request_id in self.lookup_dict, f"Cannot find \
