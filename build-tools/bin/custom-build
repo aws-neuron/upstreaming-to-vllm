@@ -1,0 +1,54 @@
+#!/bin/bash -xe
+
+#------------------------------------------------------------------------------
+# Environment Setup
+#------------------------------------------------------------------------------
+BUILD_PATH="$(brazil-path package-build-root)"
+export NEURON_VERSION="2.24"
+export VLLM_TARGET_DEVICE="neuron"
+
+
+#------------------------------------------------------------------------------
+# Version Configuration
+#------------------------------------------------------------------------------
+# Extract version information
+VERSION="$(brazil-path pkg.namefullversion)"
+VERSION="${VERSION#*-}"
+VERSION="${VERSION%.*}"
+export VLLM_VERSION="${VERSION#*-}"
+
+#------------------------------------------------------------------------------
+# Path Configuration
+#------------------------------------------------------------------------------
+DEFAULT_PATH="${BUILD_PATH}/private/dist"
+DIST_PATH="${BUILD_PATH}/pip/public/vllm-neuronx"
+
+# Create distribution directory
+mkdir -p "$DIST_PATH"
+
+#------------------------------------------------------------------------------
+# Build Process
+#------------------------------------------------------------------------------
+# Run build commands
+brazilpython brazil_build
+brazilpython brazil_wheel
+
+#------------------------------------------------------------------------------
+# Package Distribution
+#------------------------------------------------------------------------------
+# Find and copy wheel file
+WHEEL=$(find "$DEFAULT_PATH" -name "*.whl" -type f -print | head -n 1)
+if [ -z "$WHEEL" ]; then
+    echo "Error: No wheel file found in ${DEFAULT_PATH}"
+    exit 1
+fi
+
+# Copy the wheel file
+if ! cp "$WHEEL" "$DIST_PATH/"; then
+    echo "Error: Failed to copy wheel file to ${DIST_PATH}"
+    exit 1
+fi
+
+# Print success message
+WHEEL_FILENAME=$(basename "$WHEEL")
+echo "Successfully generated ${DIST_PATH}/${WHEEL_FILENAME}"
