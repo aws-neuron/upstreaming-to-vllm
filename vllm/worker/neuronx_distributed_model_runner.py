@@ -89,8 +89,6 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
         self.is_chunked_prefill = \
             self.model.neuron_config.chunked_prefill_config is not None
         self.model.is_reorder_needed = not self.is_block_kv_layout
-        self.use_custom_seq_id_mapping = self.is_prefix_caching and \
-            self.model.neuron_config.enable_eagle_speculation
 
     def get_nxd_sampling_params(self, sampling_metadata):
         if self.model.config.neuron_config.on_device_sampling_config:
