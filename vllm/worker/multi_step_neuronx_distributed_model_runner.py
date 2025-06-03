@@ -37,6 +37,8 @@ class MultiStepNeuronxDistributedModelRunner(NeuronxDistributedModelRunner):
         self.is_block_kv_layout = self.model.neuron_config.is_block_kv_layout
         self.is_prefix_caching = self.model.neuron_config.is_prefix_caching
         self.model.is_reorder_needed = not self.is_block_kv_layout
+        self.use_custom_seq_id_mapping = self.is_prefix_caching and \
+            self.model.neuron_config.enable_eagle_speculation
 
     @torch.inference_mode()
     def execute_model(
