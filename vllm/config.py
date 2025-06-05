@@ -1046,14 +1046,15 @@ class ModelConfig:
                 "Seed must be set when using external launcher backend to "
                 "make sure sampling results are the same across workers.")
 
-        total_num_attention_heads = getattr(self.hf_text_config,
-                                            "num_attention_heads", 0)
-        tensor_parallel_size = parallel_config.tensor_parallel_size
-        if total_num_attention_heads % tensor_parallel_size != 0:
-            raise ValueError(
-                f"Total number of attention heads ({total_num_attention_heads})"
-                " must be divisible by tensor parallel size "
-                f"({tensor_parallel_size}).")
+        if not current_platform.is_neuron():
+            total_num_attention_heads = getattr(self.hf_text_config,
+                                                "num_attention_heads", 0)
+            tensor_parallel_size = parallel_config.tensor_parallel_size
+            if total_num_attention_heads % tensor_parallel_size != 0:
+                raise ValueError(f"Total number of attention heads "
+                                 f"({total_num_attention_heads})"
+                                 " must be divisible by tensor parallel size "
+                                 f"({tensor_parallel_size}).")
 
         if parallel_config.enable_expert_parallel:
             self._verify_with_expert_parallelism()

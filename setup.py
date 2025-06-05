@@ -88,8 +88,11 @@ def get_neuronxcc_version():
     else:
         raise RuntimeError("Could not find Neuron version in the output")
 
+
 neuron_ver = os.getenv("NEURON_VERSION", None)
-neuronxcc_version = get_neuronxcc_version() if neuron_ver is None else neuron_ver
+neuronxcc_version = get_neuronxcc_version(
+) if neuron_ver is None else neuron_ver
+
 
 def get_gaudi_sw_version():
     """
@@ -146,6 +149,7 @@ def get_requirements() -> list[str]:
                     "#") and line.strip() != "":
                 resolved_requirements.append(line)
         return resolved_requirements
+
     if _is_neuron():
         requirements = _read_requirements("neuron.txt")
     else:
