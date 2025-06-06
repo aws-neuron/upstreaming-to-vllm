@@ -268,6 +268,22 @@ class NeuronMllamaForCausalLM(NeuronBase):
                 seq_ids: torch.Tensor, pixel_values: torch.Tensor,
                 aspect_ratios: torch.Tensor, num_chunks: torch.Tensor,
                 has_image: torch.Tensor, sampling_params) -> torch.Tensor:
+        
+        input_block_ids = seq_ids
+        origin_input_block_ids = seq_ids
+        if self.is_reorder_needed:
+            # sort block ids sequentially for perf/neuron support reasons
+            input_block_ids, sorted_indices = torch.sort(input_block_ids)
+            input_ids = torch.index_select(input_ids, 0, sorted_indices)
+            positions = torch.index_select(positions, 0, sorted_indices)
+            sampling_params = torch.index_select(sampling_params, 0,
+                                                 sorted_indices)
+            pixel_values = torch.index_select(pixel_values, 0, sorted_indices)
+            aspect_ratios = torch.index_select(aspect_ratios, 0,
+                                               sorted_indices)
+            num_chunks = torch.index_select(num_chunks, 0, sorted_indices)
+            has_image = torch.index_select(has_image, 0, sorted_indices)
+
         self.vision_mask = create_vision_mask(input_ids, self.vision_token_id)
         output = self.model(
             input_ids.to(torch.int32),
@@ -283,8 +299,14 @@ class NeuronMllamaForCausalLM(NeuronBase):
             has_image=has_image.to(torch.int32),
         )
         if self.config.neuron_config.on_device_sampling_config:
-            return output.hidden_states
-        return output.logits[:, -1, :]
+            output = output.hidden_states
+        else:
+            output = output.logits[:, -1, :]
+
+        if self.is_reorder_needed and origin_input_block_ids.shape[0] != 1:
+            restored_indices = torch.argsort(sorted_indices)
+            output = torch.index_select(output, 0, restored_indices)
+        return output
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
