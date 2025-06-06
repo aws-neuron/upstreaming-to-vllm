@@ -38,17 +38,31 @@ class NeuronTransferEngine:
                                 lengths,
                                 peer_devices,
                                 send=True,
-                                token=None):
+                                token=None,
+                                is_block_kv_layout=False):
         start_time = time.time()
         # TODO: this assume the devices and commids are identitical
         #   across sequences, which might not be true with data parallel
-        if self.local_devices is None:
+        if is_block_kv_layout:
+            # In block kv cache layout, the input tensor list can change
+            # (specifically the total number of the tensors can change with
+            # the number of block ids drawn from each tensor), so we need to
+            # recompute the local devices and comm ids
             self.local_devices = [tensor.device.index for tensor in tensors]
-
-        if self.comm_ids is None:
             self.comm_ids = [
                 self.device_to_communicator_map[i] for i in self.local_devices
             ]
+        else:
+            if self.local_devices is None:
+                self.local_devices = [
+                    tensor.device.index for tensor in tensors
+                ]
+
+            if self.comm_ids is None:
+                self.comm_ids = [
+                    self.device_to_communicator_map[i]
+                    for i in self.local_devices
+                ]
 
         self.engine.queue_transfer_with_token(tensors, offsets, lengths,
                                               peer_devices, self.local_devices,

@@ -248,12 +248,14 @@ class NeuronBuffer:
                 kv_caches, offsets, lengths, peer_devices = \
                     self.generate_transfer_sequences(entry.block_ids)
 
-                self.transfer_engine.transfer_neuron_tensors(kv_caches,
-                                                             offsets,
-                                                             lengths,
-                                                             peer_devices,
-                                                             send=True,
-                                                             token=entry.token)
+                self.transfer_engine.transfer_neuron_tensors(
+                    kv_caches,
+                    offsets,
+                    lengths,
+                    peer_devices,
+                    send=True,
+                    token=entry.token,
+                    is_block_kv_layout=self.is_block_kv_layout)
 
         except RuntimeError as e:
             if 'Connection closed by peer' not in str(e):
@@ -292,12 +294,14 @@ class NeuronBuffer:
                 kv_caches, offsets, lengths, peer_devices = \
                     self.generate_transfer_sequences(entry.block_ids)
 
-                self.transfer_engine.transfer_neuron_tensors(kv_caches,
-                                                             offsets,
-                                                             lengths,
-                                                             peer_devices,
-                                                             send=False,
-                                                             token=entry.token)
+                self.transfer_engine.transfer_neuron_tensors(
+                    kv_caches,
+                    offsets,
+                    lengths,
+                    peer_devices,
+                    send=False,
+                    token=entry.token,
+                    is_block_kv_layout=self.is_block_kv_layout)
 
         except RuntimeError as e:
             if 'Connection closed by peer' not in str(e):

@@ -434,15 +434,15 @@ def generate_kv_transfer_sequences_identical_sharding_block_kv(
     lengths = []
     offsets = []
 
-    # Each sequence often occupies multiple kv cache blocks, which means each kv
-    # cache tensor needs to be accessed multiple times in different offsets for
-    # transferring the KV cache of a sequence. This is the reason why we have
-    # block_ids in the outer for loop.
-    for block_id in block_ids:
-        for tensor in kv_caches:
+    # One sequence can occupy multiple kv cache blocks, which means each kv
+    # cache tensor may be accessed multiple times in different offsets for
+    # transferring the KV cache of the sequence.
+    for tensor in kv_caches:
+        length = math.prod(list(tensor.shape[1:])) * tensor.element_size()
+        peer_device = tensor.device.index
+        for block_id in block_ids:
             tensors.append(tensor)
-            peer_devices.append(tensor.device.index)
-            length = math.prod(list(tensor.shape[1:])) * tensor.element_size()
+            peer_devices.append(peer_device)
             offset = length * block_id
             lengths.append(length)
             offsets.append(offset)
