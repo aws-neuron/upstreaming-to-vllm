@@ -108,6 +108,8 @@ class NeuronCausalLM(nn.Module):
             positions = torch.index_select(positions, 0, sorted_indices)
             sampling_params = torch.index_select(sampling_params, 0,
                                              sorted_indices)
+        if input_ids.shape[0] != sampling_params.shape[0]:
+            sampling_params = sampling_params[:input_ids.shape[0]]
         output = self.model(input_ids,
                             attention_mask=None,
                             position_ids=positions,
@@ -436,6 +438,10 @@ class NeuronSpeculationCausalLM(nn.Module):
         positions: torch.Tensor,
         input_block_ids: torch.Tensor,
         sampling_params: torch.Tensor,
+        slot_mapping: Optional[torch.Tensor],
+        input_block_tables: Optional[torch.Tensor],
+        full_context_lens: Optional[torch.Tensor],
+        computed_context_lens: Optional[torch.Tensor],
     ) -> torch.Tensor:
         origin_input_block_ids = input_block_ids
         if self.is_reorder_needed:
@@ -449,7 +455,11 @@ class NeuronSpeculationCausalLM(nn.Module):
                             attention_mask=None,
                             position_ids=positions,
                             seq_ids=input_block_ids,
-                            sampling_params=sampling_params)
+                            sampling_params=sampling_params,
+                            slot_mapping=slot_mapping,
+                            block_table=input_block_tables,
+                            full_context_lens=full_context_lens,
+                            computed_context_lens=computed_context_lens)
         if self.is_reorder_needed:
             restored_indices = torch.argsort(sorted_indices)
 
@@ -499,7 +509,7 @@ class NeuronSpeculationCausalLM(nn.Module):
                    for token_id in accepted_token_ids_by_step[step_index]):
                 break
             step_output_token_ids = []
-            for sequence_index in range(batch_size):
+            for sequence_index in range(min(batch_size, len(seq_ids))):
                 token_id = accepted_token_ids_by_step[step_index][
                     sequence_index]
                 step_output_token_ids.append(
@@ -650,6 +660,11 @@ def _get_default_speculation_config(model_config: ModelConfig,
                                     speculation_config: SpeculativeConfig):
     """Generate a neuron config for speculative decoding based on vllm config
     args."""
+    default_num_blocks=ceil(
+        scheduler_config.max_model_len // cache_config.block_size
+    ) * scheduler_config.max_num_seqs
+    if cache_config.num_gpu_blocks_override is not None:
+        default_num_blocks = cache_config.num_gpu_blocks_override
     neuron_config = dict(
         tp_degree=parallel_config.tensor_parallel_size,
         ctx_batch_size=1,
@@ -666,7 +681,10 @@ def _get_default_speculation_config(model_config: ModelConfig,
         on_device_sampling_config=dict(
             top_k=1,
             do_sample=False,
-        ))
+        ),
+        pa_num_blocks=default_num_blocks,
+        pa_block_size=cache_config.block_size,
+    )
     return neuron_config
 
 
