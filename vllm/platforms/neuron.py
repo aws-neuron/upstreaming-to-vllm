@@ -50,9 +50,10 @@ class NeuronPlatform(Platform):
             parallel_config.distributed_executor_backend = "uni"
 
         if vllm_config.cache_config and vllm_config.model_config:
-            # neuron needs block_size = max_model_len
-            vllm_config.cache_config.block_size = \
-                vllm_config.model_config.max_model_len  # type: ignore
+            if not vllm_config.cache_config.enable_prefix_caching:
+                # neuron needs block_size = max_model_len
+                vllm_config.cache_config.block_size = \
+                    vllm_config.model_config.max_model_len  # type: ignore
 
         if vllm_config.model_config and vllm_config.model_config.use_mla:
             logger.info(
