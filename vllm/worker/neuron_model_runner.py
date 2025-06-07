@@ -2,6 +2,7 @@
 
 import os
 from dataclasses import dataclass
+from itertools import chain
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Union
 
 import torch
@@ -127,6 +128,13 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
 
         if not self._on_device_sampling_disabled:
             self._init_neuron_sampling()
+        # Prefix caching is not supported by Transformer-NeuronX
+        self.is_prefix_caching = False
+
+        # A mapping of vLLM request Id to neuron sequence id.
+        self.vllm_req_to_neuron_seq_id_mapping: Dict[str, int] = {}
+        # Set of neuron sequence id that are free for use.
+        self.free_seq_ids = set(range(self.scheduler_config.max_num_seqs))
 
     def _init_neuron_sampling(self) -> None:
         if current_platform.use_transformers_neuronx():
@@ -150,9 +158,6 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             global_top_k=self._MAX_NEURON_SAMPLING_TOP_K)
 
     def load_model(self) -> None:
-        # Disable prefix caching
-        self.is_prefix_caching = False
-
         self.model = get_neuron_model(self.model_config,
                                       parallel_config=self.parallel_config,
                                       scheduler_config=self.scheduler_config)
@@ -183,7 +188,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             seq_ids = list(seq_group_metadata.seq_data.keys())
             assert len(seq_ids) == 1
             seq_id = seq_ids[0]
-
+            req_id = seq_group_metadata.request_id
             seq_data = seq_group_metadata.seq_data[seq_id]
             prompt_tokens = seq_data.get_token_ids()
             seq_len = len(prompt_tokens)
@@ -195,6 +200,16 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             assert seq_group_metadata.block_tables is not None
             block_table = seq_group_metadata.block_tables[seq_id]
             if self.is_prefix_caching:
+                # New request, assign free batch id
+                assert req_id not in \
+                    self.vllm_req_to_neuron_seq_id_mapping, \
+                    (
+                        "Encountered an existing request ID "
+                        "while prefilling a new request"
+                    )
+                assert self.free_seq_ids, "No free sequence ID available!"
+                assigned_slot = self.free_seq_ids.pop()
+                self.vllm_req_to_neuron_seq_id_mapping[req_id] = assigned_slot
                 # pad the block_table to have the length of num_gpu_blocks
                 padded_block_table = [self._BLOCK_TABLE_PAD
                                       ] * max_blocks_per_seq
@@ -216,9 +231,8 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                         slot_mapping_for_cur_seq.append(self._SLOT_MAPPING_PAD)
                 # skip the computed_tokens
                 slot_mapping.append(slot_mapping_for_cur_seq[computed_tokens:])
-                input_tokens[-1] = input_tokens[-1]
-                input_positions[-1] = input_positions[-1]
-                input_block_ids.append(seq_id)
+                input_block_ids.append(
+                    self.vllm_req_to_neuron_seq_id_mapping[req_id])
             else:
                 assert len(block_table) == 1
                 input_block_ids.append(block_table[0])
@@ -264,6 +278,20 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                 input_block_tables, full_context_lens, computed_context_lens,
                 seq_lens, multi_modal_kwargs)
 
+    def _get_slots_for_speculation(
+        self,
+        position,
+        block_table,
+        block_size,
+        speculation_length,
+    ) -> List[int]:
+        seq_slots = [
+            range(block_idx * block_size, (block_idx + 1) * block_size)
+            for block_idx in block_table
+        ]
+        flattened_seq_slots = list(chain(*seq_slots))
+        return flattened_seq_slots[position:position + speculation_length]
+
     def _prepare_decode(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
@@ -283,7 +311,8 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             assert not seq_group_metadata.is_prompt
 
             seq_ids = list(seq_group_metadata.seq_data.keys())
-
+            assert len(seq_ids) == 1
+            req_id = seq_group_metadata.request_id
             for seq_id in seq_ids:
                 seq_data = seq_group_metadata.seq_data[seq_id]
                 generation_token = seq_data.get_last_token_id()
@@ -297,8 +326,22 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                 assert seq_group_metadata.block_tables is not None
                 block_table = seq_group_metadata.block_tables[seq_id]
                 if self.is_prefix_caching:
-                    # pad the block_table to have the length of num_gpu_blocks
-                    padded_block_table = [self._BLOCK_TABLE_PAD
+                    assert req_id in \
+                        self.vllm_req_to_neuron_seq_id_mapping, \
+                        (
+                            "The request ID for the current decode request "
+                            "is not found in request to sequence ID mapping"
+                        )
+                    attn_tkg_nki_kernel_enabled = (
+                        self.model.neuron_config.attn_tkg_nki_kernel_enabled
+                        or self.model.neuron_config.
+                        attn_block_tkg_nki_kernel_enabled)
+                    # Pad -1 to allow DMA skipping that is supported
+                    # by attention TKG kernel.
+                    # Pad the block_table to have the length of num_gpu_blocks
+                    block_table_padding = -1 if attn_tkg_nki_kernel_enabled \
+                                                else self._BLOCK_TABLE_PAD
+                    padded_block_table = [block_table_padding
                                           ] * max_blocks_per_seq
                     padded_block_table[:len(block_table)] = block_table[:]
                     input_block_tables.append(padded_block_table)
@@ -307,9 +350,17 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                     block_offset = position % self.cache_config.block_size
                     slot = block_number * self.cache_config.block_size \
                             + block_offset
-                    slot_mapping_for_cur_seq = [slot]
+                    if getattr(self, 'speculative_config', None) is not None:
+                        slot_mapping_for_cur_seq = \
+                            self._get_slots_for_speculation(
+                                position, block_table,
+                                self.cache_config.block_size,
+                                self.speculative_config.num_speculative_tokens)
+                    else:
+                        slot_mapping_for_cur_seq = [slot]
                     slot_mapping.append(slot_mapping_for_cur_seq)
-                    input_block_ids.append(seq_id)
+                    input_block_ids.append(
+                        self.vllm_req_to_neuron_seq_id_mapping[req_id])
                 else:
                     assert len(block_table) == 1
                     input_block_ids.append(block_table[0])
@@ -333,7 +384,9 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         input_block_tables = torch.tensor(input_block_tables,
                                           dtype=torch.long,
                                           device=self.device)
-        computed_context_lens_list = [length - 1 for length in full_context_lens]
+        computed_context_lens_list = [
+            length - 1 for length in full_context_lens
+        ]
         full_context_lens = torch.tensor(full_context_lens,
                                          dtype=torch.long,
                                          device=self.device
@@ -356,6 +409,13 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         finished_requests_ids: Optional[List[str]] = None
     ) -> ModelInputForNeuron:
         multi_modal_kwargs = None
+        # Free slots of finished requests
+        if finished_requests_ids and self.is_prefix_caching:
+            for req_id in finished_requests_ids:
+                if req_id in self.vllm_req_to_neuron_seq_id_mapping:
+                    freed_slot = self.vllm_req_to_neuron_seq_id_mapping.pop(req_id)
+                    self.free_seq_ids.add(freed_slot)
+
         # NOTE: We assume that all sequences in the group are all prompts or
         # all decodes.
         is_prompt = seq_group_metadata_list[0].is_prompt
