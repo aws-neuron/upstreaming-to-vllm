@@ -437,12 +437,14 @@ def generate_kv_transfer_sequences_identical_sharding_block_kv(
     # One sequence can occupy multiple kv cache blocks, which means each kv
     # cache tensor may be accessed multiple times in different offsets for
     # transferring the KV cache of the sequence.
-    for tensor in kv_caches:
-        length = math.prod(list(tensor.shape[1:])) * tensor.element_size()
-        peer_device = tensor.device.index
-        for block_id in block_ids:
+    # block_ids needs to be the outer loop to interleave the transfers
+    # across neuron devices, otherwise the transfer may hit the maximum
+    # number of pending requests limit, which is 128.
+    for block_id in block_ids:
+        for tensor in kv_caches:
+            length = math.prod(list(tensor.shape[1:])) * tensor.element_size()
             tensors.append(tensor)
-            peer_devices.append(peer_device)
+            peer_devices.append(tensor.device.index)
             offset = length * block_id
             lengths.append(length)
             offsets.append(offset)
