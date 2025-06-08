@@ -268,7 +268,7 @@ class NeuronMllamaForCausalLM(NeuronBase):
                 seq_ids: torch.Tensor, pixel_values: torch.Tensor,
                 aspect_ratios: torch.Tensor, num_chunks: torch.Tensor,
                 has_image: torch.Tensor, sampling_params) -> torch.Tensor:
-        
+
         input_block_ids = seq_ids
         origin_input_block_ids = seq_ids
         if self.is_reorder_needed:
