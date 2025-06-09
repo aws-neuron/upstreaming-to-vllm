@@ -69,6 +69,7 @@ class MultiStepNeuronxDistributedModelRunner(NeuronxDistributedModelRunner):
                 )
             assert bypass_model_exec
         logger.debug("bypass_model_exec: %s", bypass_model_exec)
+
         if not bypass_model_exec:
             logger.debug(
                 "Chose to not bypass execution. Running normal inference.")

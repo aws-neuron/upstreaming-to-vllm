@@ -1307,6 +1307,9 @@ def setup_server(args):
         # Interrupt server on sigterm while initializing
         raise KeyboardInterrupt("terminated")
 
+    # set env API_SERVER_PORT for xPyD disaggregated inference
+    os.environ["API_SERVER_PORT"] = str(args.port)
+
     signal.signal(signal.SIGTERM, signal_handler)
 
     addr, port = sock_addr

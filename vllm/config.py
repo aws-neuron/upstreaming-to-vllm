@@ -3660,6 +3660,10 @@ class KVTransferConfig:
     neuron_core_offset: Optional[int] = 0
     """Neuron core offset if logical core not equal to physical core"""
 
+    # ETCD server <ip:port> to report worker status for dynamic xPyD
+    # disaggregated inference
+    etcd: Optional[str] = None
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
