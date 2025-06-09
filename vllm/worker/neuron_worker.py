@@ -98,6 +98,7 @@ class NeuronWorker(LocalOrDistributedWorkerBase):
         if self.vllm_config.kv_transfer_config:
             get_kv_transfer_group().register_kv_caches(
                 self.model_runner.get_model().get_kv_caches())
+            get_kv_transfer_group().connector.initialize_buffer()
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Determine the number of available KV blocks.

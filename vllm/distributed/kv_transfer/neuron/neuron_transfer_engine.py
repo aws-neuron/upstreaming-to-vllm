@@ -12,13 +12,60 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
+def init_transfer_engine(device_pairs,
+                         remote_ip,
+                         send,
+                         local_nc_offset=0,
+                         peer_nc_offset=0):
+    # make device to communicator map given scheme
+    # for now just one to one
+    device_to_communicator_map = {}  # local_lnc: communicator_id
+    if send:
+        comm_create_func = torch.ops.neuron._nrt_create_send_communicator
+    else:
+        comm_create_func = torch.ops.neuron._nrt_create_recv_communicator
+
+    device_pairs = sorted(device_pairs)
+
+    # TODO support mapping when producer and consumer kv map are not None
+    logger.info(
+        "Creating %s communicators to remote ip %s with device_pairs %s ...",
+        "send" if send else "recv", remote_ip, device_pairs)
+    for peer_lnc, local_lnc in device_pairs:
+        if local_lnc not in device_to_communicator_map:
+            device_to_communicator_map[local_lnc] = comm_create_func(
+                remote_ip, peer_lnc + peer_nc_offset,
+                local_lnc + local_nc_offset)
+
+    logger.info("Testing communicators...")
+    for i, comm in device_to_communicator_map.items():
+        iters = 0
+        sleep_time = 0.1
+        while True:
+            if iters * sleep_time == 60:
+                raise TimeoutError(
+                    "Communicator establishment timed out after 1 minute.")
+            time.sleep(sleep_time)
+            if torch.ops.neuron._nrt_test_communicator(comm):
+                break
+            iters += 1
+    logger.info("Communicators tested successfully")
+    transfer_engine = NeuronTransferEngine(
+        remote_ip,
+        device_to_communicator_map,
+        send,
+        nc_offset=local_nc_offset,
+        default_batch=len(set(device_to_communicator_map)) * 128)
+    return transfer_engine
+
+
 class NeuronTransferEngine:
 
     def __init__(self,
                  remote_ip,
                  device_to_communicator_map,
                  send,
-                 nc_offset,
+                 nc_offset=0,
                  default_batch=64):
         logger.info("Setting up Neuron Transfer Engine")
         batch_transfer_size = int(

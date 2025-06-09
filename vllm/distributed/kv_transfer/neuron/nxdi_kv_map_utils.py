@@ -5,10 +5,10 @@ This file includes:
 1. Functions to generate the KV transfer scheme based on sharding used on
 prefill and decode.
 
-2. Utility functions to generate KV map based on tp degree and number of heads. 
-Also provides functionality to extend KV map for CP or DP cases. The KV map is 
+2. Utility functions to generate KV map based on tp degree and number of heads.
+Also provides functionality to extend KV map for CP or DP cases. The KV map is
 passed to Vllm KV Transfer config and is required for supporting different
-sharding on prefill vs. decode nodes. This is temporary utility until long-term 
+sharding on prefill vs. decode nodes. This is temporary utility until long-term
 solution of exporting KV map from NxDI is implemented.
 """
 
@@ -48,7 +48,7 @@ class KVTransferSchemeElement:
 @dataclass
 class KVTransferScheme:
     """
-    Scheme for KV transfer. For each seq_id includes a list of 
+    Scheme for KV transfer. For each seq_id includes a list of
     KVTransferSchemeElement's. In addition includes some metadata such as
     the number of ranks and the number of heads per rank to enable computation
     of the length and offset of KV transfers.
@@ -77,8 +77,8 @@ class HiddenTransferSchemeElement:
 @dataclass
 class HiddenTransferScheme:
     """
-    Scheme for hidden transfer. For each seq_id includes a list of 
-    HiddenTransferSchemeElement's. Note that hidden is replicated on the cores 
+    Scheme for hidden transfer. For each seq_id includes a list of
+    HiddenTransferSchemeElement's. Note that hidden is replicated on the cores
     so the transfer is easier to work through compared to KV.
     """
     # elements: map seq_id to list of transfers for that seq_id
@@ -114,10 +114,10 @@ class HiddenTransferScheme:
 
 def validate_and_load_kv_map(kv_map_path: str) -> Dict:
     """
-    Perform validation of KV map (used to support different sharding on 
+    Perform validation of KV map (used to support different sharding on
     prefill/decode):
 
-    1. Check version of KV map 
+    1. Check version of KV map
     2. Return the KV map after changing key type to int (json keys are str)
     """
 
@@ -139,8 +139,8 @@ def validate_and_load_kv_map(kv_map_path: str) -> Dict:
 def invert_kv_hidden_map(kv_map_head: Dict,
                          kv_map_seq_ids: Dict) -> Tuple[Dict, Dict]:
     """
-    Invert KV map originally from rank -> heads and seq_ids per rank 
-    to a mapping from seq_ids -> {head -> list of ranks containing head and 
+    Invert KV map originally from rank -> heads and seq_ids per rank
+    to a mapping from seq_ids -> {head -> list of ranks containing head and
     seq_ids}. Also returns a second dict for hidden state mapping seq_ids ->
     list of ranks containing that seq_id.
 
@@ -149,10 +149,10 @@ def invert_kv_hidden_map(kv_map_head: Dict,
         kv_map_seq_ids: rank -> list(seq_ids)
 
     Returns:
-        Map from seq_id -> 
+        Map from seq_id ->
             {kv_head -> list((rank, seq_id_pos_in_rank, head_pos_in_rank))}
-        Map from seq_id -> 
-            list((rank, seq_id_pos_in_rank))}        
+        Map from seq_id ->
+            list((rank, seq_id_pos_in_rank))}
     """
     inverted_kv_map: Dict = {}
     inverted_hidden_map: Dict = {}
@@ -185,7 +185,7 @@ def generate_kv_hidden_transfer_scheme(
         sender_kv_map: Dict, receiver_kv_map: Dict,
         max_num_seqs: int) -> Tuple[KVTransferScheme, HiddenTransferScheme]:
     """
-    Generate KV map and hidden transfer scheme based on sender and receiver kv 
+    Generate KV map and hidden transfer scheme based on sender and receiver kv
     maps.
     Used when prefill and decode use different sharding strategy.
     """
@@ -296,7 +296,7 @@ def generate_kv_transfer_sequences_identical_sharding(kv_caches, max_num_seqs):
     and contiguous KV cache layout, block_ids in this
     case is a 0-dim tensor as seq_id
 
-    Returns: transfer_sequences which is a mapping from seq_id to 
+    Returns: transfer_sequences which is a mapping from seq_id to
     (tensors, offsets, lengths, peer_devices)
     """
 
@@ -332,7 +332,7 @@ def generate_kv_transfer_sequences_different_sharding(kv_caches, max_num_seqs,
     and contiguous KV cache layout, block_ids in this
     case is a 0-dim tensor as seq_id
 
-    Returns: transfer_sequences which is a mapping from seq_id to 
+    Returns: transfer_sequences which is a mapping from seq_id to
     (tensors, offsets, lengths, peer_devices)
     """
 
@@ -424,8 +424,8 @@ def generate_kv_transfer_sequences_identical_sharding_block_kv(
     """
     transfer scheme that support only same sharding
     and blockwise KV cache layout
-    
-    Returns: transfer_sequences which is a mapping from seq_id to 
+
+    Returns: transfer_sequences which is a mapping from seq_id to
     (tensors, offsets, lengths, peer_devices)
     """
     # TODO we can define a new data class for transfer sequences
@@ -468,14 +468,14 @@ def setup_transfer_scheme(kv_caches: List, producer_kv_map: Optional[Dict],
     """
     Set up KV transfer scheme based on KV maps on prefill and decode.
     This is used to support different sharding strategies.
-    
+
     returns:
-        transfer_sequences: mapping from seq_id to the transfer sequence which 
+        transfer_sequences: mapping from seq_id to the transfer sequence which
         is a list of (tensors, offsets, lengths, peer_devices).
 
-    Currently we generate a mapping from seq_id to the transfer sequence which 
-    is a list of (tensors, offsets, lengths, peer_devices). 
-    
+    Currently we generate a mapping from seq_id to the transfer sequence which
+    is a list of (tensors, offsets, lengths, peer_devices).
+
     TODO: For blockwise cache consider generating only single layer here and
     later expand to full layers. This can help reduce the size of this map.
     """
@@ -492,12 +492,24 @@ def setup_transfer_scheme(kv_caches: List, producer_kv_map: Optional[Dict],
         is_default_case = False
 
     if is_default_case:
-        return generate_kv_transfer_sequences_identical_sharding(
+        sequences = generate_kv_transfer_sequences_identical_sharding(
             kv_caches, max_num_seqs)
     else:
-        return generate_kv_transfer_sequences_different_sharding(
+        sequences = generate_kv_transfer_sequences_different_sharding(
             kv_caches, max_num_seqs, producer_kv_map, consumer_kv_map,
             is_producer)
+
+    # TODO: not efficient, should generate pairs along with sequences
+    pairs = []  # distinct pairs of (peer_lnc, remote_lnc)
+    for _, sequence in sequences.items():
+        tensors, _, _, peer_devices = sequence
+        pairs += list(
+            set(zip(peer_devices,
+                    [tensor.device.index for tensor in tensors])))
+
+    pairs = list(set(pairs))
+
+    return sequences, pairs
 
 
 # ----------------------------------
