@@ -23,6 +23,8 @@ from neuronx_distributed_inference.modules.attention.gqa import (
     should_pad_scale)
 from torch.nn import functional as F
 
+from vllm.distributed.kv_transfer.neuron.kv_block_aggregator import (
+    aggregate_kv_blocks)
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -420,7 +422,7 @@ def generate_kv_transfer_sequences_different_sharding(kv_caches, max_num_seqs,
 
 
 def generate_kv_transfer_sequences_identical_sharding_block_kv(
-        kv_caches, block_ids):
+        kv_caches, block_ids, block_ids_in_peer_device):
     """
     transfer scheme that support only same sharding
     and blockwise KV cache layout
@@ -434,19 +436,26 @@ def generate_kv_transfer_sequences_identical_sharding_block_kv(
     lengths = []
     offsets = []
 
-    # One sequence can occupy multiple kv cache blocks, which means each kv
-    # cache tensor may be accessed multiple times in different offsets for
-    # transferring the KV cache of the sequence.
-    # block_ids needs to be the outer loop to interleave the transfers
-    # across neuron devices, otherwise the transfer may hit the maximum
-    # number of pending requests limit, which is 128.
-    for block_id in block_ids:
+    aggregated_block_ids, aggregated_block_ids_in_peer_device = \
+        aggregate_kv_blocks(
+            block_ids, block_ids_in_peer_device)
+
+    logger.debug("block_ids: %s", block_ids)
+    logger.debug("block_ids_in_peer_device: %s", block_ids_in_peer_device)
+    logger.debug("aggregated_block_ids: %s", aggregated_block_ids)
+    logger.debug("aggregated_block_ids_in_peer_device: %s",
+                 aggregated_block_ids_in_peer_device)
+
+    for chunk in aggregated_block_ids:
         for tensor in kv_caches:
-            length = math.prod(list(tensor.shape[1:])) * tensor.element_size()
             tensors.append(tensor)
             peer_devices.append(tensor.device.index)
-            offset = length * block_id
-            lengths.append(length)
+
+            block_length = math.prod(list(
+                tensor.shape[1:])) * tensor.element_size()
+            chunk_length = len(chunk) * block_length
+            offset = block_length * chunk[0]
+            lengths.append(chunk_length)
             offsets.append(offset)
 
     return tensors, offsets, lengths, peer_devices
