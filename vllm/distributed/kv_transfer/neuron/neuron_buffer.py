@@ -23,8 +23,12 @@ class LookupEntry:
         self.request_id = request_id
         self.output_token = output_token
         self.block_ids = block_ids
+        self.block_ids_in_peer_device = None
         self.transfer_done = False
         self.token = token
+
+    def set_block_ids_in_peer_device(self, block_ids_in_peer_device):
+        self.block_ids_in_peer_device = block_ids_in_peer_device
 
 
 class NeuronBuffer:
@@ -120,7 +124,7 @@ class NeuronBuffer:
     def get_transfer_engine(self, remote_id=""):
         return self.transfer_engines[remote_id]
 
-    def generate_transfer_sequences(self, block_ids, remote_id=""):
+    def generate_transfer_sequences(self, entry, remote_id=""):
         """
         return generated transfer sequence by indexing with seq_id.
 
@@ -140,12 +144,13 @@ class NeuronBuffer:
             peer_devices: list of ints, peer device index
         """
         logger.debug("generate_transfer_sequences with block_ids %s",
-                     block_ids)
+                     entry.block_ids)
         if self.is_block_kv_layout:
             return generate_kv_transfer_sequences_identical_sharding_block_kv(
-                self.kv_caches, block_ids)
+                self.kv_caches, entry.block_ids,
+                entry.block_ids_in_peer_device)
         else:
-            seq_id = block_ids[0]
+            seq_id = entry.block_ids[0]
             return self.transfer_sequences[remote_id][seq_id]
 
     def get_output_token(self, request_id):
@@ -169,7 +174,8 @@ class SendBuffer(NeuronBuffer):
         logger.info("SendBuffer %s init signal plane", self.buffer_id)
         self.router = Router(f"tcp://*:{self.zmq_port}")
 
-        self.send_handler_thread = threading.Thread(target=self.send_handler, daemon=True)
+        self.send_handler_thread = threading.Thread(target=self.send_handler,
+                                                    daemon=True)
         self.send_handler_thread.start()
 
     def async_send_kv_caches(self, request_id, block_ids, output_tokens):
@@ -222,6 +228,7 @@ class SendBuffer(NeuronBuffer):
                     f"invalid request type {request['type']}"
 
                 request_id = request["request_id"]
+                block_ids_in_peer_device = request["block_ids_in_peer_device"]
 
                 look_up_success = True
                 entry: Optional[LookupEntry] = None
@@ -236,13 +243,16 @@ class SendBuffer(NeuronBuffer):
                     continue
 
                 assert entry is not None
-                self.router.send_json(identity, {
-                    "success": True,
-                    "output_token": entry.output_token.item()
-                })
+                entry.set_block_ids_in_peer_device(block_ids_in_peer_device)
+                self.router.send_json(
+                    identity, {
+                        "success": True,
+                        "output_token": entry.output_token.item(),
+                        "block_ids_in_peer_device": entry.block_ids,
+                    })
 
                 kv_caches, offsets, lengths, peer_devices = \
-                    self.generate_transfer_sequences(entry.block_ids,
+                    self.generate_transfer_sequences(entry,
                                                      remote_id=identity_str)
 
                 self.get_transfer_engine(
@@ -299,7 +309,8 @@ class RecvBuffer(NeuronBuffer):
             local_nc_offset=self.nc_offset,
             peer_nc_offset=peer_nc_offset)
 
-        self.recv_handler_thread = threading.Thread(target=self.recv_handler, daemon=True)
+        self.recv_handler_thread = threading.Thread(target=self.recv_handler,
+                                                    daemon=True)
         self.recv_handler_thread.start()
 
     def async_recv_kv_caches(self, request_id, block_ids):
@@ -318,8 +329,12 @@ class RecvBuffer(NeuronBuffer):
                 logger.debug("Try lookup with request_id %s", request_id)
 
                 self.dealer.send_json({
-                    "type": "lookup",
-                    "request_id": request_id
+                    "type":
+                    "lookup",
+                    "request_id":
+                    request_id,
+                    "block_ids_in_peer_device":
+                    entry.block_ids
                 })
 
                 response = self.dealer.recv_json()
@@ -333,9 +348,13 @@ class RecvBuffer(NeuronBuffer):
 
                 entry.output_token = torch.tensor(
                     response["output_token"]).unsqueeze(0)
+                entry.set_block_ids_in_peer_device(
+                    response["block_ids_in_peer_device"])
+                logger.debug("received block ids from peer device: %s",
+                             entry.block_ids_in_peer_device)
 
                 kv_caches, offsets, lengths, peer_devices = \
-                    self.generate_transfer_sequences(entry.block_ids)
+                    self.generate_transfer_sequences(entry)
 
                 self.get_transfer_engine().transfer_neuron_tensors(
                     kv_caches,
