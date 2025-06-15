@@ -5,6 +5,7 @@ Neuron KV Cache Connector for Disaggregated Inference
 """
 
 import json
+import math
 import os
 import threading
 import time
@@ -274,9 +275,9 @@ class NeuronConnector(KVConnectorBase):
             request_id = model_input.request_ids[i]
             if self.is_block_kv_layout:
                 block_ids = model_input.input_block_tables[i]
-                num_effective_blocks = model_input.full_context_lens[
-                    i] // self.block_size
-                block_ids = block_ids[:num_effective_blocks + 1].tolist()
+                num_effective_blocks = math.ceil(
+                    model_input.full_context_lens[i].item() / self.block_size)
+                block_ids = block_ids[:num_effective_blocks].tolist()
             else:
                 block_ids = model_input.input_block_ids[i]
                 if len(block_ids.shape) == 0:

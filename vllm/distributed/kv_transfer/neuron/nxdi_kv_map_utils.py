@@ -436,12 +436,13 @@ def generate_kv_transfer_sequences_identical_sharding_block_kv(
     lengths = []
     offsets = []
 
+    logger.debug("block_ids: %s", block_ids)
+    logger.debug("block_ids_in_peer_device: %s", block_ids_in_peer_device)
+
     aggregated_block_ids, aggregated_block_ids_in_peer_device = \
         aggregate_kv_blocks(
             block_ids, block_ids_in_peer_device)
 
-    logger.debug("block_ids: %s", block_ids)
-    logger.debug("block_ids_in_peer_device: %s", block_ids_in_peer_device)
     logger.debug("aggregated_block_ids: %s", aggregated_block_ids)
     logger.debug("aggregated_block_ids_in_peer_device: %s",
                  aggregated_block_ids_in_peer_device)
