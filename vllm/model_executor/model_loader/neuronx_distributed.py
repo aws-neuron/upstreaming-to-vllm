@@ -184,10 +184,14 @@ class NeuronCausalLM(nn.Module):
             for k, v in override_neuron_config.items():
                 setattr(self.model.config.neuron_config, k, v)
             self.model.load(compiled_model_path)
+            self.config.neuron_config = self.model.config.neuron_config
+            logger.info(
+                "Successfully loaded precompiled model artifacts from %s",
+                compiled_model_path)
             return
         except (FileNotFoundError, ValueError) as e:
             logger.warning("Exception: %s", e)
-            logger.warning("Failed to load the model from %s, Recompiling...",
+            logger.warning("Failed to load the model from %s. Recompiling...",
                            compiled_model_path)
         if not os.path.exists(model_name_or_path):
             hf_model = AutoModelForCausalLM.from_pretrained(model_name_or_path)
@@ -359,9 +363,12 @@ class NeuronMllamaForCausalLM(nn.Module):
             self.vision_token_id = tokenizer(
                 "<|image|>", add_special_tokens=False).input_ids[0]
             self.model.load(compiled_model_path)
+            logger.info(
+                "Successfully loaded precompiled model artifacts from %s",
+                compiled_model_path)
             return
         except (FileNotFoundError, ValueError):
-            logger.warning("Failed to load the model from %s, Recompiling...",
+            logger.warning("Failed to load the model from %s. Recompiling...",
                            compiled_model_path)
         if not os.path.exists(model_name_or_path):
             hf_model = AutoModelForCausalLM.from_pretrained(model_name_or_path)
@@ -370,7 +377,7 @@ class NeuronMllamaForCausalLM(nn.Module):
             model_name_or_path = saved_path
         self.model = neuronx_model_cls(model_name_or_path, config)
 
-        logger.info("\nCompiling and saving model to %s", model_name_or_path)
+        logger.info("\nCompiling and saving model to %s", compiled_model_path)
 
         p = multiprocessing.Process(target=compile_model,
                                     args=(self, compiled_model_path))
@@ -544,10 +551,13 @@ class NeuronSpeculationCausalLM(nn.Module):
             for k, v in override_neuron_config.items():
                 setattr(self.model.config.neuron_config, k, v)
             self.model.load(compiled_model_path)
+            logger.info(
+                "Successfully loaded precompiled model artifacts from %s",
+                compiled_model_path)
             return
         except (FileNotFoundError, ValueError) as e:
             logger.warning("Exception: %s", e)
-            logger.warning("Failed to load the model from %s Recompiling...",
+            logger.warning("Failed to load the model from %s. Recompiling...",
                            compiled_model_path)
         if not os.path.exists(model_name_or_path):
             hf_model = AutoModelForCausalLM.from_pretrained(model_name_or_path)
