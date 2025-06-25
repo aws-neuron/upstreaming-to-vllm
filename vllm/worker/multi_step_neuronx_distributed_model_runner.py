@@ -55,6 +55,21 @@ class MultiStepNeuronxDistributedModelRunner(NeuronxDistributedModelRunner):
         model_executable = self.model
         bypass_model_exec = False
         kv_caches = []
+
+        if self.need_send_kv_ahead(model_input):
+            # update completion count ahead of execution
+            self.completion_count += 1
+            logger.debug(
+                "Start streaming KV cache ahead and hidden_states (if "
+                "EAGLE) ahead execution. With completion count %s",
+                self.completion_count)
+            get_kv_transfer_group().connector.send_kv_caches_and_hidden_states(
+                model_executable,
+                model_input,
+                kv_caches,
+                None,
+                completion_count=self.completion_count)
+
         if self.need_recv_kv(model_input):
             # It doesn't trigger KV cache transfer here which
             # could block decode, transfer was trigger during scheduler
@@ -88,12 +103,11 @@ class MultiStepNeuronxDistributedModelRunner(NeuronxDistributedModelRunner):
                     device=self.device,
                 ),
             )
-
-        if self.need_send_kv(model_input):
+        if self.need_send_kv_after(model_input):
             logger.debug(
                 "Sending KV cache, model output, and hidden_states (if EAGLE)."
             )
-            get_kv_transfer_group().send_kv_caches_and_hidden_states(
+            get_kv_transfer_group().connector.send_kv_caches_and_hidden_states(
                 # model_executable is used to know which layer the current
                 # worker is working on, so that we can send KV for only those
                 # layers.

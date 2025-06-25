@@ -435,7 +435,7 @@ def main():
         threading.Thread(target=refresh_worker_status,
                          args=(args.etcd, ),
                          daemon=True).start()
-    app.run(port=8000)
+    app.run(host="0.0.0.0", port=8000)
 
 
 if __name__ == '__main__':

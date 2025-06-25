@@ -104,6 +104,7 @@ class NeuronBase(nn.Module):
             # rearrange tensors with tp
             for tp_idx, per_tp_state in enumerate(state):
                 for key, val in per_tp_state.items():
+                    # logger.debug("get state with key %s", key)
                     tp_tensors_map[tp_idx].append(val)
 
             for i in range(len(tp_tensors_map[0])):

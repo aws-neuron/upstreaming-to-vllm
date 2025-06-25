@@ -1157,9 +1157,10 @@ class Scheduler:
             else:
                 self.transferring.popleft()
                 leftover_waiting_sequences.append(seq_group)
-                logger.debug(
-                    "seq group %s' hasn't finished KV Cache "
-                    "transfer, push back into transferring", seq_group)
+                # TODO: Reduce log frequency or implement log rate limiting
+                # logger.debug(
+                #     "seq group %s' hasn't finished KV Cache "
+                #     "transfer, push back into transferring", seq_group)
 
         self.transferring.extendleft(leftover_waiting_sequences)
 
@@ -1357,10 +1358,23 @@ class Scheduler:
             )
             budget.add_num_seqs(seq_group.request_id, num_new_seqs)
 
+            if has_kv_transfer_group() and \
+                get_kv_transfer_group().config.kv_transfer_config.per_layer_kv_transfer:
+                # with per layer transfer, only schedule on prefill at a time
+                # to track completion count, as vLLM has no control over the
+                # order of sequence execution by NxDI
+                break
+
         # Queue requests that couldn't be scheduled.
         waiting_queue.extendleft(leftover_waiting_sequences)
         if len(seq_groups) > 0:
             self.prev_prompt = True
+
+        if has_kv_transfer_group() and \
+            get_kv_transfer_group().config.kv_transfer_config.per_layer_kv_transfer:
+            assert len(seq_groups) <= 1, "cannot schedule more than " \
+            "one prefill request with per layer transfer under DI, " \
+            f"got {len(seq_groups)}."
 
         return SchedulerPrefillOutputs(
             seq_groups=seq_groups,
@@ -1873,11 +1887,15 @@ class Scheduler:
         for seq_group in self.transferring:
             transfer_done = get_kv_transfer_group().check_transfer_done(
                 seq_group.request_id, remove=True)
-            logger.debug("Transfer done %s for request %s", transfer_done,
-                         seq_group.request_id)
+
             if not transfer_done:
+                # TODO: need to reduce the logging frequency
+                # logger.debug("Try free but " \
+                #     "transfer not done for request %s",
+                #          seq_group.request_id)
                 remaining.append(seq_group)
             else:
+                logger.debug("Free request_id %s", seq_group.request_id)
                 self._free_finished_seq_group(seq_group)
 
         self.transferring = remaining

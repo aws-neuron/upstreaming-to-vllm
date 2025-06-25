@@ -3664,6 +3664,8 @@ class KVTransferConfig:
     # disaggregated inference
     etcd: Optional[str] = None
 
+    per_layer_kv_transfer: bool = False
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,

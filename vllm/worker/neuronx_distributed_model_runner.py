@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-
 import copy
+import os
+import time
 from typing import List, Optional, Set, Tuple
 
 import torch
@@ -174,11 +175,11 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
             # get hidden_states (output tokens with on-device sampling)
             # from connector
             hidden_states, bypass_model_exec, model_input = \
-                get_kv_transfer_group().recv_kv_caches_and_hidden_states(
-                    model_executable,
-                    model_input,
-                    kv_caches,
-                )
+            get_kv_transfer_group().recv_kv_caches_and_hidden_states(
+                model_executable,
+                model_input,
+                kv_caches,
+            )
 
             assert bypass_model_exec, (
                 "bypass_model_exec is not True "
@@ -186,7 +187,31 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
 
         logger.debug("bypass_model_exec: %s", bypass_model_exec)
 
+        # Note: need to update completion count right here
+        # as decode would also update KV cache.
+        # Nede to update completion count ahead of execution
+        self.completion_count += 1
+
+        if self.need_send_kv_ahead(model_input):
+            logger.debug(
+                "Start streaming KV cache ahead and hidden_states (if "
+                "EAGLE) ahead execution. With completion count %s",
+                self.completion_count)
+
+            if os.environ.get("DI_DEBUG_PER_LAYER_SLEEP", None):
+                t = int(os.environ.get("DI_DEBUG_PER_LAYER_SLEEP", "5"))
+                logger.debug("sleep for %s s before execute model", t)
+                time.sleep(t)
+
+            get_kv_transfer_group().connector.send_kv_caches_and_hidden_states(
+                model_executable,
+                model_input,
+                kv_caches,
+                None,  # hidden_states not available
+                completion_count=self.completion_count)
+
         if not bypass_model_exec:
+
             hidden_states = self.model(
                 input_ids=model_input.input_tokens,
                 positions=model_input.input_positions,
@@ -203,11 +228,15 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
                                              device=self.device),
             )
 
-        if self.need_send_kv(model_input):
+        if self.need_send_kv_ahead(model_input):
+            get_kv_transfer_group().set_output_token(model_input,
+                                                     hidden_states)
+
+        if self.need_send_kv_after(model_input):
             logger.debug(
                 "Sending KV cache, model output, and hidden_states (if "
                 "EAGLE).")
-            get_kv_transfer_group().send_kv_caches_and_hidden_states(
+            get_kv_transfer_group().connector.send_kv_caches_and_hidden_states(
                 # model_executable is used to know which layer the current
                 # worker is working on, so that we can send KV for only
                 # those layers.
@@ -239,6 +268,7 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
             sampling_metadata=model_input.sampling_metadata,
         )
         return output
+        
 
     def execute_model_for_mllama(
         self,
@@ -251,7 +281,7 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
         sampling_params = self.get_nxd_sampling_params(
             model_input.sampling_metadata)
 
-        if model_input.multi_modal_kwargs.get('pixel_values') is not None:
+        if model_input.multi_modal_kwargs.get('image') is not None:
             hidden_states = self.model(
                 input_ids=model_input.input_tokens,
                 positions=model_input.input_positions,
