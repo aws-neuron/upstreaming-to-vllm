@@ -141,6 +141,8 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         # Set of neuron sequence id that are free for use.
         self.free_seq_ids = set(range(self.scheduler_config.max_num_seqs))
 
+        self.completion_count = 0
+
     def _init_neuron_sampling(self) -> None:
         if current_platform.use_transformers_neuronx():
             from transformers_neuronx.config import GenerationConfig
@@ -679,14 +681,27 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         return self.vllm_config.kv_transfer_config.is_kv_consumer \
             and is_prefill_run
 
-    def need_send_kv(self, model_input) -> bool:
-        if self.vllm_config.kv_transfer_config is None:
-            return False
-
+    def _is_prefill_and_producer(self, model_input):
         is_prefill_run = (model_input.input_positions[:, 0]).sum().item() == 0
 
         return self.vllm_config.kv_transfer_config.is_kv_producer \
             and is_prefill_run
+
+    def need_send_kv_ahead(self, model_input) -> bool:
+
+        kvt_config = self.vllm_config.kv_transfer_config
+        if kvt_config is None or not kvt_config.per_layer_kv_transfer:
+            return False
+
+        return self._is_prefill_and_producer(model_input)
+
+    def need_send_kv_after(self, model_input) -> bool:
+
+        kvt_config = self.vllm_config.kv_transfer_config
+        if kvt_config is None or kvt_config.per_layer_kv_transfer:
+            return False
+
+        return self._is_prefill_and_producer(model_input)
 
     def remove_all_loras(self):
         raise NotImplementedError(

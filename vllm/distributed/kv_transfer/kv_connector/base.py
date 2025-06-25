@@ -130,4 +130,7 @@ class KVConnectorBase(ABC):
     def check_transfer_done(self, request_id, remove=False):
         raise NotImplementedError
 
+    def set_output_token(self, request_id, output_token):
+        raise NotImplementedError
+
 KVConnectorBaseType = Union[KVConnectorBase, KVConnectorBase_V1]

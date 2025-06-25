@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
+import os
 import queue
 import threading
 import time
-from typing import Optional
+from enum import Enum
 
 import torch
 
@@ -17,18 +18,46 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
+class Status(Enum):
+    NOT_STARTED = 0
+    PENDING = 1
+    DONE = 2
+
+
 class LookupEntry:
 
-    def __init__(self, request_id, block_ids, output_token=None, token=None):
+    def __init__(self,
+                 request_id,
+                 block_ids,
+                 output_token=None,
+                 completion_token=None,
+                 completion_count=0):
         self.request_id = request_id
         self.output_token = output_token
         self.block_ids = block_ids
         self.block_ids_in_peer_device = None
-        self.transfer_done = False
-        self.token = token
+        self.token_transfer_status = Status.NOT_STARTED
+        self.completion_token = completion_token
+        self.completion_count = completion_count
 
     def set_block_ids_in_peer_device(self, block_ids_in_peer_device):
         self.block_ids_in_peer_device = block_ids_in_peer_device
+
+
+class LookupTask:
+
+    def __init__(self, request_type, request_id, entry, priority=1):
+        self.priority = priority
+        self.request_type = request_type
+        self.request_id = request_id
+        self.entry = entry
+
+    def __str__(self):
+        return f"Task(request_type={self.request_type}, \
+            request_id={self.request_id})"
+
+    def __lt__(self, other):
+        return self.priority < other.priority
 
 
 class NeuronBuffer:
@@ -41,9 +70,10 @@ class NeuronBuffer:
                  zmq_port,
                  kv_map_path,
                  is_block_kv_layout,
-                 nc_offset,
                  local_ip,
                  local_port,
+                 nc_offset=0,
+                 per_layer_kv_transfer=False,
                  send=True):
         logger.info(
             "initialize %s buffer, " \
@@ -60,6 +90,7 @@ class NeuronBuffer:
         self.remote_ip = remote_ip
         self.zmq_ip = zmq_ip
         self.zmq_port = zmq_port
+        self.per_layer_kv_transfer = per_layer_kv_transfer
         self.send = send
 
         self.lock = threading.Lock()
@@ -67,7 +98,7 @@ class NeuronBuffer:
         self.kv_map = None
 
         self.lookup_dict = {}
-        self.lookup_queue: queue.Queue = queue.Queue()
+        self.lookup_queue: queue.PriorityQueue = queue.PriorityQueue()
 
         # Try to load kv_map_path from kv_transfer_config if specified
         if kv_map_path:
@@ -96,8 +127,10 @@ class NeuronBuffer:
                                             peer_nc_offset=0):
         logger.info(
             "Setting up kv_scheme with peer <ip:port>: %s, " \
-            "local kv_map:%s, peer_kv_map: %s",
-            remote_id, kv_map, peer_kv_map)
+            "local kv_map:%s, peer_kv_map: %s, " \
+            "local nc_offset %s, peer nc_offset %s",
+            remote_id, kv_map, peer_kv_map,
+            local_nc_offset, peer_nc_offset)
         # Try to load kv_map_path from kv_transfer_config if specified
         assert self.kv_caches is not None
         max_num_seqs = self.kv_caches[0].shape[0]
@@ -117,6 +150,7 @@ class NeuronBuffer:
             transfer_device_pairs,
             remote_ip,
             self.send,
+            per_layer_kv_transfer=self.per_layer_kv_transfer,
             local_nc_offset=local_nc_offset,
             peer_nc_offset=peer_nc_offset)
         logger.info("Done setting up KV transfer scheme")
@@ -160,33 +194,124 @@ class NeuronBuffer:
         return self.lookup_dict[request_id].output_token
 
     def check_transfer_done(self, request_id, remove=False):
-        token = self.lookup_dict[request_id].token
-        done = token.is_done()
+        entry = self.lookup_dict[request_id]
+        completion_token = entry.completion_token
+        done = completion_token.is_done()
+
+        if not done:
+            return False
+
+        if done and self.per_layer_kv_transfer:
+
+            if self.send:
+                if entry.token_transfer_status != Status.DONE:
+                    return False
+            else:
+                # initiate token lookup with higher priority
+                # as the token should be ready soon once KV cache
+                # are all transferred. And new KV cache transfer shouldn't
+                # start before that.
+                if entry.token_transfer_status == Status.NOT_STARTED:
+                    self.lookup_queue.put(
+                        LookupTask("lookup_token",
+                                   request_id,
+                                   entry,
+                                   priority=0))
+                    entry.token_transfer_status = Status.PENDING
+                    return False
+
+                elif entry.token_transfer_status == Status.PENDING:
+                    return False
+                else:
+                    assert entry.output_token is not None
+
         if remove and done:
             del self.lookup_dict[request_id]
 
-        return done
+        return True
 
 
 class SendBuffer(NeuronBuffer):
 
     def init_signal_plane(self):
-        logger.info("SendBuffer %s init signal plane", self.buffer_id)
+        logger.info("[SendBuffer %s] init signal plane", self.buffer_id)
         self.router = Router(f"tcp://*:{self.zmq_port}")
 
         self.send_handler_thread = threading.Thread(target=self.send_handler,
                                                     daemon=True)
         self.send_handler_thread.start()
 
-    def async_send_kv_caches(self, request_id, block_ids, output_tokens):
+    def set_output_token(self, request_id, output_token):
+        logger.debug("[SendBuffer %s] set output token for request_id %s",
+                     self.buffer_id, request_id)
+        self.lookup_dict[request_id].output_token = output_token
+
+    def async_send_kv_caches(self,
+                             request_id,
+                             block_ids,
+                             output_tokens,
+                             completion_count=0):
         self.lookup_dict[request_id] = LookupEntry(
             request_id,
             block_ids,
             output_tokens,
-            token=torch.classes.neuron.CompletionToken())
+            completion_count=completion_count,
+            completion_token=torch.classes.neuron.CompletionToken())
+
+    def _process_lookup_all(self, identity, request):
+        identity_str = identity.decode('utf-8')
+        request_id = request["request_id"]
+        block_ids_in_peer_device = request["block_ids_in_peer_device"]
+
+        if request_id not in self.lookup_dict:
+            self.router.send_json(identity, {"success": False})
+            return
+
+        entry = self.lookup_dict[request_id]
+
+        self.router.send_json(identity, {
+            "success": True,
+            "output_token": entry.output_token.item() \
+                if entry.output_token else None,
+            "block_ids_in_peer_device": entry.block_ids,
+        })
+
+        entry.set_block_ids_in_peer_device(block_ids_in_peer_device)
+        kv_caches, offsets, lengths, peer_devices = \
+            self.generate_transfer_sequences(entry,
+                                            remote_id=identity_str)
+
+        self.get_transfer_engine(
+            remote_id=identity_str).transfer_neuron_tensors(
+                kv_caches,
+                offsets,
+                lengths,
+                peer_devices,
+                completion_token=entry.completion_token,
+                completion_count=entry.completion_count \
+                    if self.per_layer_kv_transfer else 0,
+                is_block_kv_layout=self.is_block_kv_layout)
+
+    def _process_lookup_token(self, identity, request):
+        request_id = request["request_id"]
+
+        if request_id not in self.lookup_dict or \
+            self.lookup_dict[request_id].output_token is None:
+            self.router.send_json(identity, {"success": False})
+            return
+
+        entry = self.lookup_dict[request_id]
+
+        self.router.send_json(identity, {
+            "success": True,
+            "output_token": entry.output_token.item()
+        })
+
+        entry.token_transfer_status = Status.DONE
 
     def send_handler(self):
-        logger.info("start send_handler thread on %s", self.buffer_id)
+        logger.info("[SendBuffer %s] start send_handler thread",
+                    self.buffer_id)
         try:
             while True:
                 # Receive all message parts
@@ -194,16 +319,18 @@ class SendBuffer(NeuronBuffer):
 
                 identity_str = identity.decode('utf-8')
 
-                logger.debug("Buffer %s get message: %s %s", self.buffer_id,
-                             identity_str, request)
+                logger.debug("[SendBuffer %s] get message: %s %s",
+                             self.buffer_id, identity_str, request)
 
                 if request["type"] == "handshake":
                     self.router.send_json(identity, {
                         "status": "ok",
                         "timestamp": time.time()
                     })
-                    logger.info("Get handshake request from receiver: %s",
-                                identity_str)
+                    logger.info(
+                        "[SendBuffer %s] Get handshake request " \
+                        "from receiver: %s",
+                        self.buffer_id, identity_str)
                     continue
 
                 if request["type"] == "kv_map_init":
@@ -213,8 +340,12 @@ class SendBuffer(NeuronBuffer):
                         "kv_map": self.kv_map,
                         "nc_offset": self.nc_offset
                     })
-                    logger.info("Get kv_map_init request from receiver: %s",
-                                identity_str)
+                    logger.info(
+                        "[SendBuffer %s] Get kv_map_init request " \
+                        "from receiver: %s, with peer kv_map %s "
+                        "and nc_offset %s",
+                        self.buffer_id, identity_str,
+                        peer_kv_map, peer_nc_offset)
 
                     self.setup_kv_scheme_and_transfer_engine(
                         self.kv_map,
@@ -224,68 +355,37 @@ class SendBuffer(NeuronBuffer):
                         peer_nc_offset=peer_nc_offset)
                     continue
 
-                assert request["type"] == "lookup", \
-                    f"invalid request type {request['type']}"
-
-                request_id = request["request_id"]
-                block_ids_in_peer_device = request["block_ids_in_peer_device"]
-
-                look_up_success = True
-                entry: Optional[LookupEntry] = None
-
-                if request_id in self.lookup_dict:
-                    entry = self.lookup_dict[request_id]
-                else:
-                    look_up_success = False
-
-                if not look_up_success:
-                    self.router.send_json(identity, {"success": False})
+                if request["type"] == "lookup_all":
+                    self._process_lookup_all(identity, request)
                     continue
 
-                assert entry is not None
-                entry.set_block_ids_in_peer_device(block_ids_in_peer_device)
-                self.router.send_json(
-                    identity, {
-                        "success": True,
-                        "output_token": entry.output_token.item(),
-                        "block_ids_in_peer_device": entry.block_ids,
-                    })
+                if request["type"] == "lookup_token":
+                    self._process_lookup_token(identity, request)
+                    continue
 
-                kv_caches, offsets, lengths, peer_devices = \
-                    self.generate_transfer_sequences(entry,
-                                                     remote_id=identity_str)
-
-                self.get_transfer_engine(
-                    remote_id=identity_str).transfer_neuron_tensors(
-                        kv_caches,
-                        offsets,
-                        lengths,
-                        peer_devices,
-                        send=True,
-                        token=entry.token,
-                        is_block_kv_layout=self.is_block_kv_layout)
+                raise Exception(f"invalid request type {request['type']}")
 
         except RuntimeError as e:
             if 'Connection closed by peer' not in str(e):
                 raise e
 
-        logger.info("Closing send_handler thread")
+        logger.info("[SendBuffer %s] Closing send_handler thread",
+                    self.buffer_id)
 
 
 class RecvBuffer(NeuronBuffer):
 
     def init_signal_plane(self):
-        logger.info("RecvBuffer %s init signal plane", self.buffer_id)
-        self.dealer = Dealer(self.buffer_id,
-                             f"tcp://{self.zmq_ip}:{self.zmq_port}")
+        logger.info("[RecvBuffer %s] init signal plane", self.buffer_id)
+
+        self.remote_zmq_server = f"{self.zmq_ip}:{self.zmq_port}"
+        self.dealer = Dealer(self.buffer_id, f"tcp://{self.remote_zmq_server}")
 
         self.dealer.send_json({"type": "handshake"})
 
         response = self.dealer.recv_json()
-        logger.info(
-            "RecvBuffer get response from SendBuffer, " \
-            "self.buffer_id %s: response %s",
-            self.buffer_id, response)
+        logger.info("[RecvBuffer %s] get response %s", self.buffer_id,
+                    response)
 
         # Exchange KV maps
         peer_kv_map = None
@@ -298,10 +398,11 @@ class RecvBuffer(NeuronBuffer):
         peer_kv_map = response["kv_map"]
         peer_nc_offset = response["nc_offset"]
 
-        logger.info("RecvBuffer %s sent kv_map: %s", self.buffer_id,
-                    self.kv_map)
-        logger.info("RecvBuffer %s received peer_kv_map: %s", self.buffer_id,
-                    peer_kv_map)
+        logger.info("[RecvBuffer %s] sent kv_map: %s and nc_offset %s",
+                    self.buffer_id, self.kv_map, self.nc_offset)
+        logger.info("[RecvBuffer %s] received peer_kv_map: %s" \
+                    " and peer_nc_offset %s", self.buffer_id,
+                    peer_kv_map, peer_nc_offset)
         self.setup_kv_scheme_and_transfer_engine(
             self.kv_map,
             peer_kv_map,
@@ -314,59 +415,104 @@ class RecvBuffer(NeuronBuffer):
         self.recv_handler_thread.start()
 
     def async_recv_kv_caches(self, request_id, block_ids):
-        entry = LookupEntry(request_id,
-                            block_ids,
-                            token=torch.classes.neuron.CompletionToken())
+        entry = LookupEntry(
+            request_id,
+            block_ids,
+            completion_token=torch.classes.neuron.CompletionToken())
         self.lookup_dict[request_id] = entry
-        self.lookup_queue.put((request_id, entry))
+        self.lookup_queue.put(
+            LookupTask("lookup_all", request_id, entry, priority=1))
+
+    def _process_lookup_all(self, entry, response):
+        logger.debug(
+            "[Recv Buffer %s] got success lookup_all response %s " \
+            "from peer %s:%s",
+            self.buffer_id, response, self.zmq_ip, self.zmq_port)
+        if response["output_token"] is None:
+            # this should only happen at per layer transfer
+            # TODO: add proper error handling
+            if not self.per_layer_kv_transfer:
+                logger.error("Get None output token from peer with " \
+                    "per layer transfer disable")
+        else:
+            entry.output_token = torch.tensor(
+                response["output_token"]).unsqueeze(0)
+        entry.set_block_ids_in_peer_device(
+            response["block_ids_in_peer_device"])
+
+        kv_caches, offsets, lengths, peer_devices = \
+            self.generate_transfer_sequences(entry)
+
+        # no need to wait on completion for recv buffer
+        self.get_transfer_engine().transfer_neuron_tensors(
+            kv_caches,
+            offsets,
+            lengths,
+            peer_devices,
+            completion_count=0,
+            completion_token=entry.completion_token,
+            is_block_kv_layout=self.is_block_kv_layout)
+
+    def _process_lookup_token(self, entry, response):
+        logger.debug(
+            "[RecvBuffer %s] got success lookup token response %s " \
+            "from peer %s:%s",
+            self.buffer_id, response, self.zmq_ip, self.zmq_port)
+        entry.output_token = torch.tensor(
+            response["output_token"]).unsqueeze(0)
+        entry.token_transfer_status = Status.DONE
 
     def recv_handler(self):
-        logger.info("start recv_hanlder thread on %s", self.buffer_id)
+        logger.info("[RecvBuffer %s] start recv_hanlder thread",
+                    self.buffer_id)
         try:
             while True:
-                request_id, entry = self.lookup_queue.get()
+                task = self.lookup_queue.get()
+                assert task.request_type in ["lookup_all", "lookup_token"]
 
-                logger.debug("Try lookup with request_id %s", request_id)
-
+                logger.debug(
+                    "[RecvBuffer %s] send request to " \
+                    "remote_zmq_server %s: %s",
+                    self.buffer_id, self.remote_zmq_server, task)
                 self.dealer.send_json({
-                    "type":
-                    "lookup",
-                    "request_id":
-                    request_id,
-                    "block_ids_in_peer_device":
-                    entry.block_ids
+                    "request_id": task.request_id,
+                    "block_ids_in_peer_device": task.entry.block_ids,
+                    "type": task.request_type,
                 })
 
                 response = self.dealer.recv_json()
 
-                if not response["success"]:
-                    self.lookup_queue.put((request_id, entry))
+                logger.debug(
+                    "[RecvBuffer %s] get response from " \
+                    "remote_zmq_server %s: %s",
+                    self.buffer_id, self.remote_zmq_server, response)
+
+                if response["success"]:
+                    logger.debug(
+                        "[RecvBuffer %s] lookup [%s] with request_id [%s]"
+                        " is successful", self.buffer_id, task.request_type,
+                        task.request_id)
+                    if task.request_type == "lookup_all":
+                        self._process_lookup_all(task.entry, response)
+                    else:
+                        self._process_lookup_token(task.entry, response)
+                else:
+                    logger.debug(
+                        "[RecvBuffer %s] lookup [%s] with request_id [%s]"
+                        " failed", self.buffer_id, task.request_type,
+                        task.request_id)
+                    self.lookup_queue.put(task)
+                    if os.environ.get("DI_DEBUG_FAILED_SLEEP", None):
+                        t = int(os.environ.get("DI_DEBUG_FAILED_SLEEP", "1"))
+                        logger.debug("[RecvBuffer %s] sleep for %s s",
+                                     self.buffer_id, t)
+                        time.sleep(t)
+
                     continue
-
-                logger.debug("Lookup with request_id %s is successful",
-                             request_id)
-
-                entry.output_token = torch.tensor(
-                    response["output_token"]).unsqueeze(0)
-                entry.set_block_ids_in_peer_device(
-                    response["block_ids_in_peer_device"])
-                logger.debug("received block ids from peer device: %s",
-                             entry.block_ids_in_peer_device)
-
-                kv_caches, offsets, lengths, peer_devices = \
-                    self.generate_transfer_sequences(entry)
-
-                self.get_transfer_engine().transfer_neuron_tensors(
-                    kv_caches,
-                    offsets,
-                    lengths,
-                    peer_devices,
-                    send=False,
-                    token=entry.token,
-                    is_block_kv_layout=self.is_block_kv_layout)
 
         except RuntimeError as e:
             if 'Connection closed by peer' not in str(e):
                 raise e
 
-        logger.info("Closing recv_handler thread")
+        logger.info("[RecvBuffer %s] Closing recv_handler thread",
+                    self.buffer_id)
