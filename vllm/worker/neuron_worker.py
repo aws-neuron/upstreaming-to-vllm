@@ -119,7 +119,7 @@ class NeuronWorker(LocalOrDistributedWorkerBase):
                                   self.cache_config.block_size
                                   ) * self.scheduler_config.max_num_seqs
         else:
-            num_gpu_blocks = self.scheduler_config.max_num_seqs + 1
+            num_gpu_blocks = self.scheduler_config.max_num_seqs
 
         # Swap not yet supported with Neuron backend.
         num_cpu_blocks = 0
