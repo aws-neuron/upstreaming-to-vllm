@@ -69,10 +69,11 @@ def parse_request_id(request_id):
 
     """
     import re
-    ipv4_pattern = re.compile(r'(?P<ip>(?:\d{1,3}\.){3}\d{1,3}):(?P<port>\d+)')
-    ipv6_pattern = re.compile(r'(?P<ip>\[[0-9A-Fa-f:]+\]):(?P<port>\d+)')
+    ipv4_pattern = r'(?P<ip>(?:\d{1,3}\.){3}\d{1,3}):(?P<port>\d+)'
+    ipv6_pattern = r'(?P<ip>\[[0-9A-Fa-f:]+\]):(?P<port>\d+)'
 
-    for pattern in (ipv4_pattern, ipv6_pattern):
+    for pattern_str in (ipv4_pattern, ipv6_pattern):
+        pattern = re.compile(pattern_str)
         match = pattern.search(request_id)
         if match:
             break
@@ -84,8 +85,7 @@ def parse_request_id(request_id):
         remote_ip = remote_ip[1:-1]
     port = match.group('port')
 
-    uuid = request_id[:match.start()]
-    uuid = re.sub(r'[_\-\<\>\{\}]+$', '', uuid)
+    uuid = re.sub(pattern_str, '', request_id)
     return uuid, remote_ip, port
 
 
