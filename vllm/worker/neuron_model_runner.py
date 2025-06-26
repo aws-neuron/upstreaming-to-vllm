@@ -601,7 +601,6 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             logger.debug("bypass_model_exec: %s", bypass_model_exec)
 
             if not bypass_model_exec:
-                print(model_input)
                 hidden_states = self.model(
                     input_ids=model_input.input_tokens,
                     positions=model_input.input_positions,
