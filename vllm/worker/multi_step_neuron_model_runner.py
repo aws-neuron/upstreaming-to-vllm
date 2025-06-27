@@ -54,9 +54,6 @@ class MultiStepNeuronModelRunner(NeuronModelRunner):
                     parallel_config=self.parallel_config,
                     scheduler_config=self.scheduler_config,
                     speculation_config=self.speculation_config)
-            # Block KV is not supported by Transformer-NeuronX
-            self.is_block_kv_layout = False
-            self.is_prefix_caching = False
         else:
             raise NotImplementedError(
                 "Supports only Transformer-NeuronX based models.")

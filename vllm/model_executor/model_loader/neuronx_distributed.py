@@ -11,12 +11,13 @@ import multiprocessing
 import os
 import shutil
 from math import ceil
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import torch
 import torch.nn as nn
 from neuronx_distributed_inference.models.config import (
-    FusedSpecNeuronConfig, NeuronConfig, OnDeviceSamplingConfig)
+    ChunkedPrefillConfig, FusedSpecNeuronConfig, NeuronConfig,
+    OnDeviceSamplingConfig)
 from neuronx_distributed_inference.models.mllama.utils import (
     create_vision_mask)
 from neuronx_distributed_inference.modules.lora_serving import (
@@ -25,8 +26,8 @@ from neuronx_distributed_inference.utils.hf_adapter import (
     load_pretrained_config)
 from transformers import AutoModelForCausalLM, AutoTokenizer, PretrainedConfig
 
-from vllm.config import (CacheConfig, ModelConfig, ParallelConfig, SchedulerConfig,
-                         SpeculativeConfig)
+from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
+                         SchedulerConfig, SpeculativeConfig)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
@@ -74,14 +75,14 @@ _NEURON_SUPPORTED_MODELS: dict[str, tuple[str, str]] = {
 
 class NeuronBase(nn.Module):
 
-    def __init__(self,
-                 config: PretrainedConfig,
-                 on_device_sampling_disabled: bool = False) -> None:
+    def __init__(self, config: PretrainedConfig) -> None:
         super().__init__()
         self.config = config
         self.logits_processor = LogitsProcessor(
             config.get_text_config().vocab_size, logits_as_input=True)
-        self.on_device_sampling_disabled = on_device_sampling_disabled
+        # To be consistent with NeuronxDistributedModelRunner
+        self.on_device_sampling_disabled = bool(
+            int(os.getenv("NEURON_ON_DEVICE_SAMPLING_DISABLED", "0")))
         if self.on_device_sampling_disabled:
             # Use default sampler
             self.sampler = Sampler()
@@ -114,17 +115,19 @@ class NeuronBase(nn.Module):
 
 class NeuronCausalLM(NeuronBase):
 
-    def forward(self,
-                input_ids: torch.Tensor,
-                positions: torch.Tensor,
-                input_block_ids: torch.Tensor,
-                sampling_params: torch.Tensor,
-                prev_hidden: Optional[torch.Tensor] = None,
-                adapter_ids: Optional[torch.Tensor] = None,
-                slot_mapping: Optional[torch.Tensor] = None,
-                input_block_tables: Optional[torch.Tensor] = None,
-                full_context_lens: Optional[torch.Tensor] = None,
-                computed_context_lens: Optional[torch.Tensor] = None,
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        input_block_ids: torch.Tensor,
+        sampling_params: torch.Tensor,
+        prev_hidden: Optional[torch.Tensor] = None,
+        adapter_ids: Optional[torch.Tensor] = None,
+        slot_mapping: Optional[torch.Tensor] = None,
+        input_block_tables: Optional[torch.Tensor] = None,
+        full_context_lens: Optional[torch.Tensor] = None,
+        computed_context_lens: Optional[torch.Tensor] = None,
+        prefill_completion_state: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         origin_input_block_ids = input_block_ids
         if self.is_reorder_needed:
@@ -133,7 +136,7 @@ class NeuronCausalLM(NeuronBase):
             input_ids = torch.index_select(input_ids, 0, sorted_indices)
             positions = torch.index_select(positions, 0, sorted_indices)
             sampling_params = torch.index_select(sampling_params, 0,
-                                             sorted_indices)
+                                                 sorted_indices)
         if input_ids.shape[0] != sampling_params.shape[0]:
             sampling_params = sampling_params[:input_ids.shape[0]]
         output = self.model(input_ids,
@@ -151,7 +154,12 @@ class NeuronCausalLM(NeuronBase):
         if self.config.neuron_config.on_device_sampling_config:
             output = output.hidden_states
         else:
-            output = output.logits[:, -1, :]
+            if self.neuron_config.is_chunked_prefill:
+                assert prefill_completion_state is not None
+                idx_for_sampling = prefill_completion_state.nonzero().flatten()
+                output = output.logits[0, idx_for_sampling, :]
+            else:
+                output = output.logits[:, -1, :]
 
         if self.is_reorder_needed and origin_input_block_ids.shape[0] != 1:
             restored_indices = torch.argsort(sorted_indices)
@@ -169,7 +177,7 @@ class NeuronCausalLM(NeuronBase):
         sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
         # on-device sampling
-        if self.config.neuron_config.on_device_sampling_config:
+        if self.neuron_config.on_device_sampling_config:
             batch_size = logits.shape
             seq_ids = [
                 seq_id for sg in sampling_metadata.seq_groups
@@ -478,7 +486,7 @@ class NeuronSpeculationCausalLM(NeuronBase):
             input_ids = torch.index_select(input_ids, 0, sorted_indices)
             positions = torch.index_select(positions, 0, sorted_indices)
             sampling_params = torch.index_select(sampling_params, 0,
-                    sorted_indices)
+                                                 sorted_indices)
         output = self.model(input_ids,
                             attention_mask=None,
                             position_ids=positions,
@@ -655,10 +663,24 @@ def _get_default_neuron_config(model_config: ModelConfig,
     """Generate a neuron config based on vllm config args."""
     on_device_sampling_config = OnDeviceSamplingConfig(dynamic=True,
                                                        deterministic=False)
-    batch_size = scheduler_config.max_num_seqs
-    default_num_blocks=ceil(
-        scheduler_config.max_model_len // cache_config.block_size
-    ) * scheduler_config.max_num_seqs
+    if scheduler_config.chunked_prefill_enabled:
+        # It concatenates all the inputs along seq dimension, so the batch
+        # size is 1
+        batch_size = 1
+        # Chunk size (max_num_batched_tokens) will be used as max context
+        # length for neuron
+        max_context_length = scheduler_config.max_num_batched_tokens
+    else:
+        batch_size = scheduler_config.max_num_seqs
+        max_context_length = scheduler_config.max_model_len
+
+    max_num_blocks = ceil(
+        scheduler_config.max_model_len /
+        cache_config.block_size) * scheduler_config.max_num_seqs
+
+    default_num_blocks = ceil(
+        scheduler_config.max_model_len //
+        cache_config.block_size) * scheduler_config.max_num_seqs
     if cache_config.num_gpu_blocks_override is not None:
         default_num_blocks = cache_config.num_gpu_blocks_override
 
@@ -666,7 +688,7 @@ def _get_default_neuron_config(model_config: ModelConfig,
         tp_degree=parallel_config.tensor_parallel_size,
         ctx_batch_size=1,
         batch_size=batch_size,
-        max_context_length=scheduler_config.max_model_len,
+        max_context_length=max_context_length,
         seq_len=scheduler_config.max_model_len,
         enable_bucketing=True,
         is_continuous_batching=True,
@@ -675,9 +697,16 @@ def _get_default_neuron_config(model_config: ModelConfig,
         padding_side="right",
         on_device_sampling_config=on_device_sampling_config,
         lora_serving_config=lora_serving_config,
-        pa_num_blocks=default_num_blocks,
+        pa_num_blocks=max_num_blocks,
         pa_block_size=cache_config.block_size,
+        is_block_kv_layout=(scheduler_config.chunked_prefill_enabled
+                            or cache_config.enable_prefix_caching),
     )
+    if scheduler_config.chunked_prefill_enabled:
+        cp_config = ChunkedPrefillConfig(
+            max_num_seqs=scheduler_config.max_num_seqs, )
+        neuron_config["chunked_prefill_config"] = cp_config
+
     return neuron_config
 
 
@@ -688,9 +717,9 @@ def _get_default_speculation_config(model_config: ModelConfig,
                                     speculation_config: SpeculativeConfig):
     """Generate a neuron config for speculative decoding based on vllm config
     args."""
-    default_num_blocks=ceil(
-        scheduler_config.max_model_len // cache_config.block_size
-    ) * scheduler_config.max_num_seqs
+    default_num_blocks = ceil(
+        scheduler_config.max_model_len //
+        cache_config.block_size) * scheduler_config.max_num_seqs
     if cache_config.num_gpu_blocks_override is not None:
         default_num_blocks = cache_config.num_gpu_blocks_override
     neuron_config = dict(
@@ -720,12 +749,15 @@ def _get_neuron_config_after_override(default_neuron_config,
                                       overridden_neuron_config):
     """Update default neuron config values with override args"""
     overridden_neuron_config = overridden_neuron_config or {}
+    if "chunked_prefill_config" in overridden_neuron_config:
+        overridden_neuron_config[
+            "chunked_prefill_config"] = ChunkedPrefillConfig(
+                **overridden_neuron_config["chunked_prefill_config"])
     default_neuron_config.update(overridden_neuron_config)
     return default_neuron_config
 
 
-def get_neuron_model(model_config: ModelConfig,
-                     cache_config: CacheConfig,
+def get_neuron_model(model_config: ModelConfig, cache_config: CacheConfig,
                      parallel_config: ParallelConfig,
                      scheduler_config: SchedulerConfig,
                      lora_serving_config: LoraServingConfig) -> nn.Module:
@@ -736,10 +768,12 @@ def get_neuron_model(model_config: ModelConfig,
     else:
         model = NeuronCausalLM(model_config.hf_config)
     default_neuron_config_args = _get_default_neuron_config(
-        model_config, cache_config, parallel_config, scheduler_config, lora_serving_config)
+        model_config, cache_config, parallel_config, scheduler_config,
+        lora_serving_config)
     neuron_config = _get_neuron_config_after_override(
         default_neuron_config_args, model_config.override_neuron_config)
-    neuron_config = _validate_neuron_config(cache_config, neuron_config)
+    neuron_config = _validate_neuron_config(cache_config, scheduler_config,
+                                            neuron_config)
     override_neuron_config = model_config.override_neuron_config
     model.load_weights(model_config.model,
                        neuron_config=neuron_config,
@@ -759,10 +793,12 @@ def get_neuron_speculation_model(model_config: ModelConfig,
     """
     model = NeuronSpeculationCausalLM(model_config.hf_config)
     default_neuron_config_args = _get_default_speculation_config(
-        model_config, cache_config, parallel_config, scheduler_config, speculation_config)
+        model_config, cache_config, parallel_config, scheduler_config,
+        speculation_config)
     neuron_config = _get_neuron_config_after_override(
         default_neuron_config_args, model_config.override_neuron_config)
-    neuron_config = _validate_neuron_config(cache_config, neuron_config)
+    neuron_config = _validate_neuron_config(cache_config, scheduler_config,
+                                            neuron_config)
     override_neuron_config = model_config.override_neuron_config
     model.load_weights(model_config.model,
                        speculation_config.draft_model_config.model,
@@ -772,22 +808,17 @@ def get_neuron_speculation_model(model_config: ModelConfig,
     return model.eval()
 
 
-def _validate_neuron_config(cache_config: CacheConfig, neuron_config: Dict):
+def _validate_neuron_config(cache_config: CacheConfig,
+                            scheduler_config: SchedulerConfig,
+                            neuron_config: Dict):
     if cache_config.enable_prefix_caching:
-        if not neuron_config.get("is_prefix_caching", False) or \
-            not neuron_config.get("is_block_kv_layout", False):
-                logger.warning(
-                    "Prefix caching is enabled, setting is_prefix_caching=True and "
-                    "is_block_kv_layout=True")
+        assert neuron_config.get("is_prefix_caching", False)
+        assert neuron_config.get("is_block_kv_layout", False)
 
-        neuron_config["is_prefix_caching"] = True
-        neuron_config["is_block_kv_layout"] = True
-
-    if neuron_config.get("is_prefix_caching", False) and \
-        not neuron_config.get("is_block_kv_layout", False):
-        logger.warning("Prefix caching / Chunked prefill requires block kv "
-                       "layout in Neuron, setting is_block_kv_layout=True")
-        neuron_config["is_block_kv_layout"] = True
+    if scheduler_config.chunked_prefill_enabled:
+        assert neuron_config.get("chunked_prefill_config")
+        assert neuron_config.get("is_block_kv_layout", False)
 
     logger.info("Neuron Config: %s", neuron_config)
+
     return neuron_config
