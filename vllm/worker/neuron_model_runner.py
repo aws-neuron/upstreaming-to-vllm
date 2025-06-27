@@ -46,6 +46,9 @@ class ModelInputForNeuron(ModelRunnerInputBase):
     sampling_metadata: SamplingMetadata = None
     multi_modal_kwargs: BatchedTensorInputs = None
     adapter_ids: Optional[str] = None
+    # Boolean tensor to indicate if the request is ready
+    # for sampling. Needed by chunked prefill.
+    prefill_completion_state: Optional[torch.Tensor] = None
 
     def as_broadcastable_tensor_dict(
             self) -> Dict[str, Union[int, torch.Tensor]]:
@@ -110,8 +113,6 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         self.lora_config = vllm_config.lora_config
         self.device = self.device_config.device
         self.pin_memory = is_pin_memory_available()
-        self.is_block_kv_layout = self.cache_config.block_size \
-                != self.scheduler_config.max_model_len
 
         # Multi-modal data support
         self.multi_modal_input_mapper = MULTIMODAL_REGISTRY \
@@ -172,9 +173,9 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
     def _prepare_prompt(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
-               torch.Tensor, torch.Tensor, torch.Tensor, List[int],
-               BatchedTensorInputs]:
+    ) -> Tuple[List[str], torch.Tensor, torch.Tensor, torch.Tensor,
+               torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
+               List[int], BatchedTensorInputs]:
         assert len(seq_group_metadata_list) > 0
         request_ids: List[str] = []
         input_tokens: List[List[int]] = []
@@ -189,7 +190,6 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         seq_lens: List[int] = []
         multi_modal_kwargs_list: List[MultiModalKwargs] = []
         for seq_group_metadata in seq_group_metadata_list:
-
             request_ids.append(seq_group_metadata.request_id)
             assert seq_group_metadata.is_prompt
             seq_ids = list(seq_group_metadata.seq_data.keys())
@@ -217,7 +217,8 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                         )
                     assert self.free_seq_ids, "No free sequence ID available!"
                     assigned_slot = self.free_seq_ids.pop()
-                    self.vllm_req_to_neuron_seq_id_mapping[req_id] = assigned_slot
+                    self.vllm_req_to_neuron_seq_id_mapping[
+                        req_id] = assigned_slot
 
                 # pad the block_table to have the length of num_gpu_blocks
                 padded_block_table = [self._BLOCK_TABLE_PAD
@@ -225,7 +226,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                 padded_block_table[:len(block_table)] = block_table[:]
                 input_block_tables.append(padded_block_table)
                 computed_tokens = len(seq_group_metadata.computed_block_nums
-                                     ) * self.cache_config.block_size
+                                      ) * self.cache_config.block_size
                 computed_context_lens.append(computed_tokens)
                 slot_mapping_for_cur_seq = []
                 for i in range(self.scheduler_config.max_model_len):
@@ -276,19 +277,20 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             dtype=torch.long,
             device=self.device)
         input_block_tables = torch.tensor(input_block_tables,
-            dtype=torch.long,
-            device=self.device)
+                                          dtype=torch.long,
+                                          device=self.device)
         full_context_lens = torch.tensor(seq_lens,
-            dtype=torch.long,
-            device=self.device).reshape(-1, 1)
+                                         dtype=torch.long,
+                                         device=self.device).reshape(-1, 1)
         computed_context_lens = torch.tensor(computed_context_lens,
-            dtype=torch.long,
-            device=self.device).reshape(-1, 1)
+                                             dtype=torch.long,
+                                             device=self.device).reshape(
+                                                 -1, 1)
         multi_modal_kwargs = MultiModalKwargs.batch(multi_modal_kwargs_list)
 
-        return (request_ids, input_tokens, input_positions, input_block_ids, slot_mapping,
-                input_block_tables, full_context_lens, computed_context_lens,
-                seq_lens, multi_modal_kwargs)
+        return (request_ids, input_tokens, input_positions, input_block_ids,
+                slot_mapping, input_block_tables, full_context_lens,
+                computed_context_lens, seq_lens, multi_modal_kwargs)
 
     def _get_slots_for_speculation(
         self,
@@ -307,8 +309,8 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
     def _prepare_decode(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
-               torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[List[str], torch.Tensor, torch.Tensor, torch.Tensor,
+               torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         assert len(seq_group_metadata_list) > 0
         request_ids: List[str] = []
         input_tokens: List[List[int]] = []
@@ -408,14 +410,15 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         ]
         full_context_lens = torch.tensor(full_context_lens,
                                          dtype=torch.long,
-                                         device=self.device
-                                        ).reshape(-1, 1)
+                                         device=self.device).reshape(-1, 1)
         # Convert computed_context_lens to tensor
         computed_context_lens = torch.tensor(computed_context_lens_list,
                                              dtype=torch.long,
-                                             device=self.device).reshape(-1, 1)
-        return (request_ids, input_tokens, input_positions, input_block_ids, slot_mapping,
-               input_block_tables, full_context_lens, computed_context_lens)
+                                             device=self.device).reshape(
+                                                 -1, 1)
+        return (request_ids, input_tokens, input_positions, input_block_ids,
+                slot_mapping, input_block_tables, full_context_lens,
+                computed_context_lens)
 
     def make_model_input_from_broadcasted_tensor_dict(
             self, tensor_dict: Dict[str, Any]) -> ModelInputForNeuron:
@@ -441,15 +444,15 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         is_prompt = seq_group_metadata_list[0].is_prompt
         # Prepare input tensors.
         if is_prompt:
-            (request_ids, input_tokens, input_positions, input_block_ids, slot_mapping,
-             input_block_tables, full_context_lens, seq_lens,
-             multi_modal_kwargs
-            ) = self._prepare_prompt(seq_group_metadata_list)
+            (request_ids, input_tokens, input_positions, input_block_ids,
+             slot_mapping, input_block_tables, full_context_lens, seq_lens,
+             computed_context_lens, multi_modal_kwargs
+             ) = self._prepare_prompt(seq_group_metadata_list)
         else:
             (request_ids, input_tokens, input_positions, input_block_ids,
              slot_mapping, input_block_tables, full_context_lens,
              computed_context_lens
-            ) = self._prepare_decode(seq_group_metadata_list)
+             ) = self._prepare_decode(seq_group_metadata_list)
             seq_lens = None
 
         if not self._on_device_sampling_disabled:
@@ -611,10 +614,10 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                     computed_context_lens=model_input.computed_context_lens,
                     sampling_params=sampling_params,
                     adapter_ids=model_input.adapter_ids,
-                    **MultiModalKwargs.as_kwargs(
-                        model_input.multi_modal_kwargs or {},
-                        dtype=self.model_config.dtype,
-                        device=self.device),
+                    **MultiModalKwargs.as_kwargs(model_input.multi_modal_kwargs
+                                                 or {},
+                                                 dtype=self.model_config.dtype,
+                                                 device=self.device),
                 )
 
             if self.need_send_kv(model_input):
@@ -657,7 +660,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             logits=logits,
             sampling_metadata=model_input.sampling_metadata,
         )
-        return [output]
+        return output
 
     @property
     def vocab_size(self) -> int:
