@@ -605,9 +605,6 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
 
             logger.debug("bypass_model_exec: %s", bypass_model_exec)
 
-            # Note: in 0.7.2 most of this code is in the neuronx_distributed_model_runner
-            # However that change was part of CP so is being moved here.
-
             # Note: need to update completion count right here
             # as decode would also update KV cache.
             # Nede to update completion count ahead of execution

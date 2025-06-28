@@ -211,7 +211,9 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
                 completion_count=self.completion_count)
 
         if not bypass_model_exec:
-
+            if self.need_send_kv_ahead(model_input):
+                get_kv_transfer_group().set_output_token(model_input,
+                                                    hidden_states)
             hidden_states = self.model(
                 input_ids=model_input.input_tokens,
                 positions=model_input.input_positions,
@@ -224,19 +226,17 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
                 adapter_ids=model_input.adapter_ids,
                 prefill_completion_state=model_input.prefill_completion_state,
                 **MultiModalKwargs.as_kwargs(model_input.multi_modal_kwargs
-                                             or {},
-                                             device=self.device),
+                                                or {},
+                                                dtype=self.model_config.dtype,
+                                                device=self.device),
             )
-
-        if self.need_send_kv_ahead(model_input):
-            get_kv_transfer_group().set_output_token(model_input,
-                                                     hidden_states)
+        
 
         if self.need_send_kv_after(model_input):
             logger.debug(
                 "Sending KV cache, model output, and hidden_states (if "
                 "EAGLE).")
-            get_kv_transfer_group().connector.send_kv_caches_and_hidden_states(
+            get_kv_transfer_group().send_kv_caches_and_hidden_states(
                 # model_executable is used to know which layer the current
                 # worker is working on, so that we can send KV for only
                 # those layers.
