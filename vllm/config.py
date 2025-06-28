@@ -3660,11 +3660,13 @@ class KVTransferConfig:
     neuron_core_offset: Optional[int] = 0
     """Neuron core offset if logical core not equal to physical core"""
 
-    # ETCD server <ip:port> to report worker status for dynamic xPyD
-    # disaggregated inference
     etcd: Optional[str] = None
+    """ETCD server <ip:port> to report worker status for dynamic xPyD
+    disaggregated inference
+    """
 
     per_layer_kv_transfer: bool = False
+    """Flag for neuron to do per layer transfer or transfer at end of prefill"""
 
     def compute_hash(self) -> str:
         """

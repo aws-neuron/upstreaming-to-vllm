@@ -1359,7 +1359,7 @@ class Scheduler:
             budget.add_num_seqs(seq_group.request_id, num_new_seqs)
 
             if has_kv_transfer_group() and \
-                get_kv_transfer_group().config.kv_transfer_config.per_layer_kv_transfer:
+                get_kv_transfer_group().config.per_layer_kv_transfer:
                 # with per layer transfer, only schedule on prefill at a time
                 # to track completion count, as vLLM has no control over the
                 # order of sequence execution by NxDI
@@ -1371,7 +1371,7 @@ class Scheduler:
             self.prev_prompt = True
 
         if has_kv_transfer_group() and \
-            get_kv_transfer_group().config.kv_transfer_config.per_layer_kv_transfer:
+            get_kv_transfer_group().config.per_layer_kv_transfer:
             assert len(seq_groups) <= 1, "cannot schedule more than " \
             "one prefill request with per layer transfer under DI, " \
             f"got {len(seq_groups)}."
