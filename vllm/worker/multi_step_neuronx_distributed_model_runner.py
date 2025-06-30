@@ -107,7 +107,7 @@ class MultiStepNeuronxDistributedModelRunner(NeuronxDistributedModelRunner):
             logger.debug(
                 "Sending KV cache, model output, and hidden_states (if EAGLE)."
             )
-            get_kv_transfer_group().connector.send_kv_caches_and_hidden_states(
+            get_kv_transfer_group().send_kv_caches_and_hidden_states(
                 # model_executable is used to know which layer the current
                 # worker is working on, so that we can send KV for only those
                 # layers.
