@@ -281,7 +281,7 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
         sampling_params = self.get_nxd_sampling_params(
             model_input.sampling_metadata)
 
-        if model_input.multi_modal_kwargs.get('image') is not None:
+        if model_input.multi_modal_kwargs.get('pixel_values') is not None:
             hidden_states = self.model(
                 input_ids=model_input.input_tokens,
                 positions=model_input.input_positions,
