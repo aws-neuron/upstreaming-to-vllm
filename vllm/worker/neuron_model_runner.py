@@ -621,7 +621,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                     logger.debug("sleep for %s s before execute model", t)
                     time.sleep(t)
 
-                get_kv_transfer_group().connector.send_kv_caches_and_hidden_states(
+                get_kv_transfer_group().send_kv_caches_and_hidden_states(
                     model_executable,
                     model_input,
                     kv_caches,
