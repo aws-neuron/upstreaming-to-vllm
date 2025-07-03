@@ -75,12 +75,8 @@ class NeuronTransferEngine:
         batch_transfer_size = int(
             os.environ.get("BATCH_TRANSFER", default_batch))
 
-        if os.environ.get("EXPERIMENTAL_PER_LAYER", None) == "1":
-            self.engine = torch.classes.neuron.NeuronTransferEngine(
-                batch_transfer_size, remote_ip, send, nc_offset)
-        else:
-            self.engine = torch.classes.neuron.NeuronTransferEngine(
-                batch_transfer_size, remote_ip, send, True, nc_offset)
+        self.engine = torch.classes.neuron.NeuronTransferEngine(
+            batch_transfer_size, remote_ip, send, nc_offset)
         self.current_task_id = None
         self.send = send
         self.device_to_communicator_map = device_to_communicator_map
@@ -121,21 +117,14 @@ class NeuronTransferEngine:
                 ]
         logger.debug("try initiating transfer with completion count %s",
                      completion_count)
-        if os.environ.get("EXPERIMENTAL_PER_LAYER", None) == "1":
-            use_queue = os.environ.get("DI_USE_QUEUE", None) == "1"
-            completion_time_out = int(
-                os.environ.get("DI_COMPLETION_TIMEOUT", 50))
-            logger.debug("use queue based transfer: %s", use_queue)
-            self.engine.queue_transfer_with_token(
-                tensors, offsets, lengths, peer_devices, self.local_devices,
-                self.comm_ids, completion_count, completion_token, use_queue,
-                completion_time_out)
-        else:
-            self.engine.queue_transfer_with_token(tensors, offsets, lengths,
-                                                  peer_devices,
-                                                  self.local_devices,
-                                                  self.comm_ids,
-                                                  completion_token)
+        use_queue = os.environ.get("DI_USE_QUEUE", None) == "1"
+        completion_time_out = int(
+            os.environ.get("DI_COMPLETION_TIMEOUT", 50))
+        logger.debug("use queue based transfer: %s", use_queue)
+        self.engine.queue_transfer_with_token(
+            tensors, offsets, lengths, peer_devices, self.local_devices,
+            self.comm_ids, completion_count, completion_token, use_queue,
+            completion_time_out)
         _duration = time.time() - start_time
         logger.debug(
             "initiated %s %s tensors takes %s ms (still transferring)",
