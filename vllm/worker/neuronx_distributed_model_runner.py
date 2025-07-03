@@ -210,9 +210,6 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
                 completion_count=self.completion_count)
 
         if not bypass_model_exec:
-            if self.need_send_kv_ahead(model_input):
-                get_kv_transfer_group().set_output_token(model_input,
-                                                    hidden_states)
             hidden_states = self.model(
                 input_ids=model_input.input_tokens,
                 positions=model_input.input_positions,
@@ -230,6 +227,9 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
                                                 device=self.device),
             )
         
+        if self.need_send_kv_ahead(model_input):
+            get_kv_transfer_group().set_output_token(model_input,
+                                                     hidden_states)
 
         if self.need_send_kv_after(model_input):
             logger.debug(
