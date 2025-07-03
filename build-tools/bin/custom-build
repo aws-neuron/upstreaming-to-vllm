@@ -4,7 +4,7 @@
 # Environment Setup
 #------------------------------------------------------------------------------
 BUILD_PATH="$(brazil-path package-build-root)"
-export NEURON_VERSION="2.24"
+export NEURON_VERSION="2.25"
 export VLLM_TARGET_DEVICE="neuron"
 
 
