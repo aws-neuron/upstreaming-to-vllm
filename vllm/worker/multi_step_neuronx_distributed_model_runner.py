@@ -103,6 +103,9 @@ class MultiStepNeuronxDistributedModelRunner(NeuronxDistributedModelRunner):
                     device=self.device,
                 ),
             )
+        if self.need_send_kv_ahead(model_input):
+            get_kv_transfer_group().set_output_token(model_input,
+                                                     logits)
         if self.need_send_kv_after(model_input):
             logger.debug(
                 "Sending KV cache, model output, and hidden_states (if EAGLE)."
