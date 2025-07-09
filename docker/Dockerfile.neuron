@@ -1,6 +1,6 @@
 # default base image
 # https://gallery.ecr.aws/neuron/pytorch-inference-neuronx
-ARG BASE_IMAGE="public.ecr.aws/neuron/pytorch-inference-neuronx:2.6.0-neuronx-py310-sdk2.23.0-ubuntu22.04"
+ARG BASE_IMAGE="public.ecr.aws/neuron/pytorch-inference-neuronx:2.7.0-neuronx-py310-sdk2.24.1-ubuntu22.04"
 
 FROM $BASE_IMAGE
 
