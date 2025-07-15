@@ -881,7 +881,44 @@ class EngineArgs:
             self.model = f"{MODEL_WEIGHTS_S3_BUCKET}/{self.model}"
             self.load_format = LoadFormat.RUNAI_STREAMER
 
-        return ModelConfig(
+        logger.info(f"model={self.model}, \
+                    hf_config_path={self.hf_config_path}, \
+                    task={self.task}, \
+                    tokenizer={self.tokenizer}, \
+                    tokenizer_mode={self.tokenizer_mode}, \
+                    trust_remote_code={self.trust_remote_code}, \
+                    allowed_local_media_path={self.allowed_local_media_path}, \
+                    dtype={self.dtype}, \
+                    seed={self.seed}, \
+                    revision={self.revision}, \
+                    code_revision={self.code_revision}, \
+                    rope_scaling={self.rope_scaling}, \
+                    rope_theta={self.rope_theta}, \
+                    hf_token={self.hf_token}, \
+                    hf_overrides={self.hf_overrides}, \
+                    tokenizer_revision={self.tokenizer_revision}, \
+                    max_model_len={self.max_model_len}, \
+                    quantization={self.quantization}, \
+                    enforce_eager={self.enforce_eager}, \
+                    max_seq_len_to_capture={self.max_seq_len_to_capture}, \
+                    max_logprobs={self.max_logprobs}, \
+                    disable_sliding_window={self.disable_sliding_window}, \
+                    disable_cascade_attn={self.disable_cascade_attn}, \
+                    skip_tokenizer_init={self.skip_tokenizer_init}, \
+                    enable_prompt_embeds={self.enable_prompt_embeds}, \
+                    served_model_name={self.served_model_name}, \
+                    limit_mm_per_prompt={self.limit_mm_per_prompt}, \
+                    use_async_output_proc={not self.disable_async_output_proc}, \
+                    config_format={self.config_format}, \
+                    override_neuron_config={self.override_neuron_config}, \
+                    override_pooler_config={self.override_pooler_config}, \
+                    logits_processor_pattern={self.logits_processor_pattern}, \
+                    generation_config={self.generation_config}, \
+                    override_generation_config={self.override_generation_config}, \
+                    enable_sleep_mode={self.enable_sleep_mode}, \
+                    model_impl={self.model_impl}")
+
+        model_config = ModelConfig(
             model=self.model,
             hf_config_path=self.hf_config_path,
             task=self.task,
@@ -921,6 +958,8 @@ class EngineArgs:
             enable_sleep_mode=self.enable_sleep_mode,
             model_impl=self.model_impl,
         )
+        logger.info(f"model_config: {model_config}")
+        return model_config
 
     def create_load_config(self) -> LoadConfig:
 
