@@ -58,12 +58,9 @@ class NeuronPlatform(Platform):
             vllm_config.scheduler_config.max_num_batched_tokens = max(
                 vllm_config.scheduler_config.max_model_len,
                 DEFAULT_MAX_NUM_BATCHED_TOKENS)
-
+        
         # If not prefix caching set block_size = max_model_len
         if vllm_config.cache_config.block_size is None:
-            logger.info(f"vllm_config: {vllm_config}")
-            logger.info(
-                f"vllm_config.model_config: {vllm_config.model_config}")
             vllm_config.cache_config.block_size = vllm_config.model_config.max_model_len
 
     @classmethod
