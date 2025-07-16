@@ -119,6 +119,9 @@ def refresh_worker_status(etcd_addr):
             decode_workers.clear()
             decode_workers.extend(healthy_decode_workers)
 
+        # Print worker discovery info (not just debug)
+        print(f"ETCD Worker Discovery - Prefill: {healthy_prefill_workers}, Decode: {healthy_decode_workers}")
+        
         logger.debug(
             "healthy prefill workers: %s \n healthy decode workers: %s",
             healthy_prefill_workers, healthy_decode_workers)
@@ -223,19 +226,40 @@ async def handle_request():
         # dynamic mode
         logger.info("running proxy for dynamic xPyD " \
             "with ectd addr %s", app.args.etcd)
-        # 1. wait for workers to come alive to make a P/D pair
+        # 1. Handle worker availability based on return-error-on-wait flag
         # TODO: add fallback support when there is only decode workers
-        ready = False
-        while not ready:
+        if app.args.return_error_on_wait:
+            # New behavior: return immediate error response
             with workers_lock:
                 if len(prefill_workers) == 0 or len(decode_workers) == 0:
-                    logger.info(
-                        "No available prefill workers or decode workers,"
-                        "sleep and wait for 3s...")
-                else:
-                    ready = True
-            if not ready:
-                time.sleep(3)
+                    logger.warning(
+                        "No available prefill workers or decode workers. "
+                        "Prefill workers: %d, Decode workers: %d", 
+                        len(prefill_workers), len(decode_workers))
+                    error_response = json.dumps({
+                        "error": "Service temporarily unavailable - no workers available",
+                        "type": "service_unavailable",
+                        "prefill_workers_available": len(prefill_workers),
+                        "decode_workers_available": len(decode_workers),
+                        "retry_after": 30
+                    })
+                    response = await make_response(error_response, 503)
+                    response.headers['Content-Type'] = 'application/json'
+                    response.headers['Retry-After'] = '30'
+                    return response
+        else:
+            # Original behavior: wait for workers to become available
+            ready = False
+            while not ready:
+                with workers_lock:
+                    if len(prefill_workers) == 0 or len(decode_workers) == 0:
+                        logger.info(
+                            "No available prefill workers or decode workers,"
+                            "sleep and wait for 3s...")
+                    else:
+                        ready = True
+                if not ready:
+                    time.sleep(3)
 
         # 2. round robin select prefill and decode server
         with workers_lock:
@@ -244,6 +268,8 @@ async def handle_request():
 
             prefill_ip, prefill_port = prefill_workers[p_selector]
             decode_ip, decode_port = decode_workers[d_selector]
+
+        print(f"Selected workers - Prefill: {prefill_ip}:{prefill_port}, Decode: {decode_ip}:{decode_port}")
 
         prefill_request_id = f"cmpl-{uid}_{decode_ip}:{decode_port}"
         decode_request_id = f"cmpl-{uid}_{prefill_ip}:{prefill_port}"
@@ -428,9 +454,20 @@ def main():
                         type=int,
                         default=8200,
                         help='Port for decode server (default: 8200)')
+    parser.add_argument('--return-error-on-wait',
+                        action='store_true',
+                        help='Return immediate error when no workers available instead of waiting (default: wait for workers)')
 
     args = parser.parse_args()
     app.args = args
+    
+    # Print startup configuration
+    print(f"Neuron Proxy Server starting with configuration:")
+    print(f"  --return-error-on-wait: {args.return_error_on_wait}")
+    print(f"  --etcd: {args.etcd}")
+    print(f"  --prefill-port: {args.prefill_port}")
+    print(f"  --decode-port: {args.decode_port}")
+    
     if args.etcd:
         threading.Thread(target=refresh_worker_status,
                          args=(args.etcd, ),
