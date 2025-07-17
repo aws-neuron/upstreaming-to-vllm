@@ -77,6 +77,9 @@ _NEURON_SUPPORTED_MODELS: dict[str, tuple[str, str]] = {
     "Qwen3ForCausalLM":
     ("neuronx_distributed_inference.models.qwen3.modeling_qwen3",
      "NeuronQwen3ForCausalLM"),
+    "Llama4ForConditionalGeneration":
+    ("neuronx_distributed_inference.models.llama4.modeling_llama4",
+     "NeuronLlama4ForCausalLM"),
 }
 
 
@@ -463,6 +466,139 @@ class NeuronMllamaForCausalLM(nn.Module):
         except (FileNotFoundError, ValueError):
             logger.warning("Failed to load the model from %s. Recompiling...",
                            compiled_model_path)
+        if not os.path.exists(model_name_or_path):
+            hf_model = AutoModelForCausalLM.from_pretrained(model_name_or_path)
+            saved_path = os.path.join("local-models", model_name_or_path)
+            hf_model.save_pretrained(saved_path)
+            model_name_or_path = saved_path
+        self.model = neuronx_model_cls(model_name_or_path, config)
+
+        logger.info("\nCompiling and saving model to %s", compiled_model_path)
+
+        p = multiprocessing.Process(target=compile_model,
+                                    args=(self, compiled_model_path))
+        p.start()
+        p.join()
+
+        tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
+        tokenizer.save_pretrained(compiled_model_path)
+        logger.info("Successfully compiled and saved the model in %s",
+                    compiled_model_path)
+
+        # Read "<|image|>" token_id from the tokenizer
+        self.vision_token_id = tokenizer("<|image|>",
+                                         add_special_tokens=False).input_ids[0]
+        logger.info("\nLoading model from compiled checkpoint...")
+        self.model.load(compiled_model_path)
+
+
+class NeuronLlama4ForCausalLM(NeuronMllamaForCausalLM):
+
+    def forward(self,
+                input_ids: torch.Tensor,
+                positions: torch.Tensor,
+                input_block_ids: torch.Tensor,
+                sampling_params,
+                images_flattened: torch.Tensor = None,
+                vision_mask: torch.Tensor = None,
+                **kwargs) -> torch.Tensor:
+
+        images_flattened = kwargs.get("pixel_values")
+        if images_flattened is not None:
+            logger.debug(f"images_flattened.shape = {images_flattened.shape}")
+            # images_flattened = images_flattened.permute((1, 0, 2, 3, 4))
+            bsz, n_chunks, n_channels, h, w = images_flattened.shape  # (1, 5, 3, 336, 336)
+            images_flattened = images_flattened.reshape(bsz * n_chunks, n_channels, h, w)  # (5, 3, 336, 336)
+            images_flattened = images_flattened.to(torch.bfloat16)
+            if vision_mask is None:
+                vision_mask = (
+                    input_ids == self.config.image_token_index).unsqueeze(-1)
+
+        if vision_mask is not None:
+            vision_mask = vision_mask.to(torch.bool)
+
+        origin_input_block_ids = input_block_ids
+        if self.is_reorder_needed:
+            # sort block ids sequentially for perf/neuron support reasons
+            input_block_ids, sorted_indices = torch.sort(input_block_ids)
+            input_ids = torch.index_select(input_ids, 0, sorted_indices)
+            positions = torch.index_select(positions, 0, sorted_indices)
+            sampling_params = torch.index_select(sampling_params, 0,
+                                                 sorted_indices)
+
+        if input_ids.shape[0] != sampling_params.shape[0]:
+            sampling_params = sampling_params[:input_ids.shape[0]]
+
+        output = self.model(
+            input_ids.to(torch.int32),
+            attention_mask=None,
+            position_ids=positions.to(torch.int32),
+            seq_ids=input_block_ids.flatten().to(torch.int32),
+            pixel_values=images_flattened,
+            vision_mask=vision_mask,
+            sampling_params=sampling_params,
+        )
+        if self.config.neuron_config.on_device_sampling_config:
+            output = output.hidden_states
+        else:
+            output = output.logits[:, -1, :]
+
+        if self.is_reorder_needed and origin_input_block_ids.shape[0] != 1:
+            restored_indices = torch.argsort(sorted_indices)
+            output = torch.index_select(output, 0, restored_indices)
+
+        return output
+
+    def load_weights(self, model_name_or_path: str, **kwargs):
+        arch = _get_model_architecture(self.config)
+        neuronx_module_path, neuronx_model_cls_name = (
+            _NEURON_SUPPORTED_MODELS[arch])
+        neuronx_module = importlib.import_module(neuronx_module_path)
+        neuronx_model_cls = getattr(neuronx_module, neuronx_model_cls_name)
+        # TODO: Fix loading Llama4Config
+        # neuron_config = neuronx_model_cls.get_neuron_config_cls()(
+        #     **kwargs['neuron_config'])
+        # self.config.neuron_config = neuron_config
+        # logger.info("neuron_config buckets: %s",
+        #             self.config.neuron_config.buckets)
+        # config = neuronx_model_cls.get_config_cls()(
+        #     neuron_config,
+        #     load_config=load_pretrained_config(model_name_or_path))
+        # hashed_config = hashlib.md5(
+        #     config.to_json_string().encode('utf-8')).hexdigest()
+        if os.getenv("NEURON_COMPILED_ARTIFACTS") is not None:
+            compiled_model_path = os.getenv("NEURON_COMPILED_ARTIFACTS")
+        elif os.path.exists(model_name_or_path):
+            raise RuntimeError(
+                "Llama4 only supports loading a precompiled model at the moment"
+            )
+            compiled_model_path = os.path.join(model_name_or_path,
+                                               "neuron-compiled-artifacts",
+                                               hashed_config)
+        else:
+            raise RuntimeError(
+                "Llama4 only supports loading a precompiled model at the moment"
+            )
+            compiled_model_path = os.path.join("local-models",
+                                               model_name_or_path,
+                                               "neuron-compiled-artifacts",
+                                               hashed_config)
+        try:
+            self.model = neuronx_model_cls(compiled_model_path)
+            tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
+            self.vision_token_id = tokenizer(
+                "<|image|>", add_special_tokens=False).input_ids[0]
+            self.model.load(compiled_model_path)
+            self.config.neuron_config = self.model.config.neuron_config
+            logger.info(
+                "Successfully loaded precompiled model artifacts from %s",
+                compiled_model_path)
+            return
+        except (FileNotFoundError, ValueError):
+            logger.warning("Failed to load the model from %s. Recompiling...",
+                           compiled_model_path)
+        raise RuntimeError(
+            "Llama4 only supports loading a precompiled model at the moment")
         if not os.path.exists(model_name_or_path):
             hf_model = AutoModelForCausalLM.from_pretrained(model_name_or_path)
             saved_path = os.path.join("local-models", model_name_or_path)
@@ -1011,6 +1147,8 @@ def get_neuron_model(model_config: ModelConfig, cache_config: CacheConfig,
     model_arch = _get_model_architecture(model_config.hf_config)
     if model_arch == "MllamaForConditionalGeneration":
         model = NeuronMllamaForCausalLM(model_config.hf_config)
+    elif model_arch == "Llama4ForConditionalGeneration":
+        model = NeuronLlama4ForCausalLM(model_config.hf_config)
     elif model_arch == "LlavaForConditionalGeneration":
         model = NeuronPixtralForCausalLM(model_config.hf_config)
     else:
