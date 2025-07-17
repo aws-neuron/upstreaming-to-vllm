@@ -263,8 +263,8 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
 
         # Sample the next token.
         output = self.model.sample(
-            logits=logits,
-            sampling_metadata=model_input.sampling_metadata,
+            logits,
+            model_input.sampling_metadata,
         )
         return output
         
@@ -321,6 +321,8 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
     def process_multi_modal_data_neuron(self, mm_data):
         if self.model.config.model_type == 'llava':
             return self.process_multi_modal_data_neuron_llava(mm_data)
+        elif self.model.config.model_type == 'llama4':
+            return mm_data
         elif self.model.config.model_type == 'mllama':
             return self.process_multi_modal_data_neuron_mllama(mm_data)
         else:
