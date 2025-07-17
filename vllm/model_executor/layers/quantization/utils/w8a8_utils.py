@@ -6,7 +6,7 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm import envs
-from vllm.config import CompilationLevel, get_current_vllm_config
+from vllm.config import CompilationLevel
 from vllm.platforms import current_platform
 
 # Input scaling factors are no longer optional in _scaled_mm starting
@@ -310,8 +310,17 @@ class Fp8LinearOp:
         # We also don't pad when using torch.compile,
         # as it breaks with dynamic shapes.
         if pad_output is None:
-            config = get_current_vllm_config().compilation_config
-            pad_output = config.level < CompilationLevel.PIECEWISE
+            # get_current_vllm_config will initialize an empty VllmConfig object,
+            # causing it's __post_init__ to fail in the check_and_update_config
+            # step when accessing fields of a None object,
+            # e.g., vllm_config.model_config.max_model_len
+            # * Issue: V1851522864
+            # * Come up with a temporary fix to hardcode the compilation level to 0,
+            #   which is the case for for Neuron.
+            # * File a bug report to vllm for proper fix:
+            #   https://github.com/vllm-project/vllm/issues/21134
+            compilation_config_level = 0
+            pad_output = compilation_config_level < CompilationLevel.PIECEWISE
         self.output_padding = 17 if (
             pad_output and not current_platform.is_rocm()) else None
 
