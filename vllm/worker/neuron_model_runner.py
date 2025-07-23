@@ -447,8 +447,8 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         # Prepare input tensors.
         if is_prompt:
             (request_ids, input_tokens, input_positions, input_block_ids,
-             slot_mapping, input_block_tables, full_context_lens, seq_lens,
-             computed_context_lens, multi_modal_kwargs
+             slot_mapping, input_block_tables, full_context_lens,
+             computed_context_lens, seq_lens, multi_modal_kwargs
              ) = self._prepare_prompt(seq_group_metadata_list)
         else:
             (request_ids, input_tokens, input_positions, input_block_ids,
@@ -689,7 +689,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             logits=logits,
             sampling_metadata=model_input.sampling_metadata,
         )
-        return output
+        return [output]
 
     @property
     def vocab_size(self) -> int:
