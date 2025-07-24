@@ -56,6 +56,9 @@ def ensure_kv_transfer_initialized(vllm_config: "VllmConfig") -> None:
 
     if vllm_config.kv_transfer_config is None:
         return
+    
+    assert not vllm_config.kv_transfer_config.per_layer_kv_transfer, "Per Layer KV Transfer for Disaggregated is not supported."
+    assert not vllm_config.cache_config.enable_prefix_caching, "Prefix Caching with Disaggregated Inference is not supported."
 
     if (vllm_config.kv_transfer_config.is_kv_transfer_instance
             and _KV_CONNECTOR_AGENT is None):
