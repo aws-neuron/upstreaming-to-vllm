@@ -404,11 +404,13 @@ def _resolve_chat_template_content_format(
     jinja_text = (hf_chat_template if isinstance(hf_chat_template, str)
                   else load_chat_template(chat_template, is_literal=True))
 
-    detected_format = ("string" if jinja_text is None else
+    return _detect_and_cache_format(jinja_text)
+
+@lru_cache
+def _detect_and_cache_format(
+    jinja_text: Optional[str]) -> _ChatTemplateContentFormat:
+    return ("string" if jinja_text is None else
                        _detect_content_format(jinja_text, default="string"))
-
-    return detected_format
-
 
 @lru_cache
 def _log_chat_template_content_format(
