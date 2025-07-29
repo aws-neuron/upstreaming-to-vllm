@@ -37,7 +37,6 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
         vllm_config: VllmConfig,
     ):
         super().__init__(vllm_config)
-        self.neuron_multimodal_models = ["MllamaForConditionalGeneration", "LlavaForConditionalGeneration"]
         self.lora_checkpoint = None
         self.model = None
         self.lora_serving_config = None
@@ -137,9 +136,11 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
             raise ValueError(
                 "NeuronModelRunner does not support multi-step execution.")
 
-        if _get_model_architecture(
-                self.model.config) in self.neuron_multimodal_models:
-            return self.execute_model_for_multimodal_models(
+        is_mllama = _get_model_architecture(
+            self.model.config) == "MllamaForConditionalGeneration"
+
+        if is_mllama:
+            return self.execute_model_for_mllama(
                 model_input,
                 kv_caches,
                 intermediate_tensors,
@@ -269,17 +270,49 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
         return output
         
 
-    def execute_model_for_multimodal_models(
+    def execute_model_for_mllama(
         self,
         model_input: ModelInputForNeuron,
         kv_caches: Optional[List[torch.Tensor]] = None,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
     ) -> Optional[List[SamplerOutput]]:
+
         sampling_params = self.get_nxd_sampling_params(
             model_input.sampling_metadata)
 
-        hidden_states = self.model.execute_model(model_input, sampling_params)
+        if model_input.multi_modal_kwargs.get('pixel_values') is not None:
+            hidden_states = self.model(
+                input_ids=model_input.input_tokens,
+                positions=model_input.input_positions,
+                seq_ids=model_input.input_block_ids,
+                pixel_values=model_input.multi_modal_kwargs.get(
+                    'pixel_values'),
+                aspect_ratios=model_input.multi_modal_kwargs.get(
+                    'aspect_ratios'),
+                sampling_params=sampling_params,
+                num_chunks=model_input.multi_modal_kwargs.get('num_chunks'),
+                has_image=model_input.multi_modal_kwargs.get(
+                    'has_image').squeeze(1),
+            )
+        else:
+            bs = model_input.input_tokens.shape[0] if (model_input.input_tokens
+                                                       is not None) else 1
+            empty_pixel_values = torch.zeros([bs, 1, 4, 3, 560, 560],
+                                             dtype=torch.bfloat16)
+            empty_aspect_ratios = torch.ones([bs, 1, 2], dtype=torch.int64)
+            num_chunks = torch.zeros((bs, 1), dtype=torch.int32)
+            has_image = torch.zeros([bs], dtype=torch.int32)
+            hidden_states = self.model(
+                input_ids=model_input.input_tokens,
+                positions=model_input.input_positions,
+                seq_ids=model_input.input_block_ids,
+                pixel_values=empty_pixel_values,
+                aspect_ratios=empty_aspect_ratios,
+                sampling_params=sampling_params,
+                num_chunks=num_chunks,
+                has_image=has_image,
+            )
 
         output = self.model.sample(
             hidden_states=hidden_states,
@@ -288,16 +321,7 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
 
         return [output]
 
-    def process_multi_modal_data_neuron_llava(self, mm_data):
-        # We reconstuct image_sizes here to match HF's implementation 
-        # since VLLM implementation slices pixel_values for each image separately
-        # (see vllm/model_executor/models/llava.py)
-        img_height = mm_data["pixel_values"].shape[2]
-        img_width = mm_data["pixel_values"].shape[3]
-        mm_data["image_sizes"] = torch.tensor([img_height, img_width], dtype=torch.int32)
-        return mm_data
-    
-    def process_multi_modal_data_neuron_mllama(self, mm_data):
+    def process_multi_modal_data_neuron(self, mm_data):
         # Neuron uses aspect_ratios instead of aspect_ratio_ids
         all_supported_aspect_ratios = get_all_supported_aspect_ratios(
             self.model.config.vision_config.max_num_tiles)
@@ -318,14 +342,6 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
             mm_data["has_image"] = torch.zeros(bs)
         return mm_data
 
-    def process_multi_modal_data_neuron(self, mm_data):
-        if self.model.config.model_type == 'llava':
-            return self.process_multi_modal_data_neuron_llava(mm_data)
-        elif self.model.config.model_type == 'mllama':
-            return self.process_multi_modal_data_neuron_mllama(mm_data)
-        else:
-            raise NotImplementedError(f"processing mm data for model type {self.model.config.model_type} not supported on Neuron yet!")
-        
     def _get_lora_adapter_ids(self, seq_group_metadata_list):
         # set LoRA adapter IDs for multi-lora serving
         batch_size = len(seq_group_metadata_list)

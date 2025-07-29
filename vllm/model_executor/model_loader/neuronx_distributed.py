@@ -71,9 +71,6 @@ _NEURON_SUPPORTED_MODELS: dict[str, tuple[str, str]] = {
     "Qwen2ForCausalLM":
     ("neuronx_distributed_inference.models.qwen2.modeling_qwen2",
      "NeuronQwen2ForCausalLM"),
-    "LlavaForConditionalGeneration":
-    ("neuronx_distributed_inference.models.pixtral.modeling_pixtral",
-     "NeuronPixtralForCausalLM"),
     "Qwen3ForCausalLM":
     ("neuronx_distributed_inference.models.qwen3.modeling_qwen3",
      "NeuronQwen3ForCausalLM"),
@@ -305,44 +302,10 @@ class NeuronMllamaForCausalLM(nn.Module):
             else:
                 self.has_image_cache[seq_id] = torch.zeros(1)
 
-    def execute_model(self, model_input, sampling_params):
-        if model_input.multi_modal_kwargs.get('pixel_values') is not None:
-            hidden_states = self.forward(
-                input_ids=model_input.input_tokens,
-                positions=model_input.input_positions,
-                seq_ids=model_input.input_block_ids,
-                pixel_values=model_input.multi_modal_kwargs.get(
-                    'pixel_values'),
-                aspect_ratios=model_input.multi_modal_kwargs.get(
-                    'aspect_ratios'),
-                num_chunks=model_input.multi_modal_kwargs.get('num_chunks'),
-                has_image=model_input.multi_modal_kwargs.get(
-                    'has_image').squeeze(1),
-                sampling_params=sampling_params,
-            )
-        else:
-            empty_pixel_values = torch.zeros([1, 1, 4, 3, 560, 560],
-                                             dtype=torch.bfloat16)
-            empty_aspect_ratios = torch.ones([1, 1, 2], dtype=torch.int64)
-            num_chunks = torch.tensor([[1]
-                                       ])  # dummy num_chunks, will not be used
-            has_image = torch.tensor([0])
-            hidden_states = self.forward(
-                input_ids=model_input.input_tokens,
-                positions=model_input.input_positions,
-                seq_ids=model_input.input_block_ids,
-                pixel_values=empty_pixel_values,
-                aspect_ratios=empty_aspect_ratios,
-                sampling_params=sampling_params,
-                num_chunks=num_chunks,
-                has_image=has_image,
-            )
-        return hidden_states
-
     def forward(self, input_ids: torch.Tensor, positions: torch.Tensor,
                 seq_ids: torch.Tensor, pixel_values: torch.Tensor,
                 aspect_ratios: torch.Tensor, num_chunks: torch.Tensor,
-                has_image: torch.Tensor, sampling_params: torch.Tensor) -> torch.Tensor:
+                has_image: torch.Tensor, sampling_params) -> torch.Tensor:
 
         # We update the has_image cache during prefill
         # and read the has_image cache during decode
@@ -492,194 +455,6 @@ class NeuronMllamaForCausalLM(nn.Module):
 def compile_model(neuron_model, traced_model_path):
     neuron_model.model.compile(traced_model_path)
 
-
-class NeuronPixtralForCausalLM(nn.Module):
-
-    def __init__(self,
-                 config: PretrainedConfig,
-                 on_device_sampling_disabled: bool = False) -> None:
-        super().__init__()
-        self.config = config
-        self.logits_processor = LogitsProcessor(
-            config.get_text_config().vocab_size, logits_as_input=True)
-
-        self.on_device_sampling_disabled = on_device_sampling_disabled
-        if self.on_device_sampling_disabled:
-            # Use default sampler
-            self.sampler = Sampler()
-
-        # Lazy initialized
-        self.model: nn.Module
-        self.is_reorder_needed: bool = True
-
-    def execute_model(self, model_input, sampling_params):
-        vision_mask = (model_input.input_tokens == self.config.image_token_index).unsqueeze(-1)
-        if model_input.multi_modal_kwargs.get('pixel_values') is not None:            
-            hidden_states = self.forward(
-                input_ids=model_input.input_tokens,
-                positions=model_input.input_positions,
-                seq_ids=model_input.input_block_ids,
-                sampling_params=sampling_params,
-                pixel_values=model_input.multi_modal_kwargs.get(
-                    'pixel_values'),  
-                vision_mask = vision_mask,                  
-                image_sizes=model_input.multi_modal_kwargs.get('image_sizes'),
-            )
-        else:
-            empty_pixel_values = torch.zeros([1, 3, 512, 512],
-                                             dtype=torch.bfloat16)
-            empty_image_sizes = torch.tensor([[512, 512]], dtype=torch.int32)
-            hidden_states = self.forward(
-                input_ids=model_input.input_tokens,
-                positions=model_input.input_positions,
-                seq_ids=model_input.input_block_ids,
-                pixel_values=empty_pixel_values,
-                sampling_params=sampling_params,
-                vision_mask = vision_mask,
-                image_sizes=empty_image_sizes,  
-            )
-        return hidden_states
-
-    def forward(self, input_ids: torch.Tensor, positions: torch.Tensor,
-                seq_ids: torch.Tensor, pixel_values: torch.Tensor, image_sizes: torch.Tensor, 
-                vision_mask: torch.Tensor, sampling_params: torch.Tensor) -> torch.Tensor:
-
-        input_block_ids = seq_ids
-        origin_input_block_ids = seq_ids
-        if self.is_reorder_needed:
-            # sort block ids sequentially for perf/neuron support reasons
-            input_block_ids, sorted_indices = torch.sort(input_block_ids)   
-            input_ids = torch.index_select(input_ids, 0, sorted_indices)
-            positions = torch.index_select(positions, 0, sorted_indices)
-            sampling_params = torch.index_select(sampling_params, 0,
-                                                 sorted_indices)
-            # vision inputs are only present during prefill
-            if input_ids.shape[-1] > 1:
-                pixel_values = torch.index_select(pixel_values, 0, sorted_indices)
-                image_sizes = torch.index_select(image_sizes, 0,
-                                                sorted_indices)
-                vision_mask = torch.index_select(vision_mask, 0, sorted_indices)
-
-        if pixel_values is not None:
-            pixel_values = pixel_values.to(self.config.vision_config.torch_dtype)
-
-        output = self.model(
-            input_ids.to(torch.int32),
-            attention_mask=None,
-            position_ids=positions.to(torch.int32),
-            seq_ids=seq_ids.flatten().to(torch.int32),
-            sampling_params=sampling_params,
-            pixel_values=pixel_values,
-            vision_mask=vision_mask,
-            image_sizes=image_sizes,
-        )
-        
-        if self.config.neuron_config.on_device_sampling_config:
-            output = output.hidden_states
-        else:
-            output = output.logits[:, -1, :]
-
-        if self.is_reorder_needed and origin_input_block_ids.shape[0] != 1:
-            restored_indices = torch.argsort(sorted_indices)
-            output = torch.index_select(output, 0, restored_indices)
-        return output
-
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(None, hidden_states, sampling_metadata)
-        return logits
-
-    def sample(self, hidden_states, sampling_metadata):
-        if not self.on_device_sampling_disabled:
-            with torch.profiler.record_function("sample"):
-                hidden_states = hidden_states.flatten()
-                res = []
-                sample_idx = 0
-                for seq_group in sampling_metadata.seq_groups:
-                    seq_ids = seq_group.seq_ids
-                    samples = []
-                    for seq_id in seq_ids:
-                        token_id = hidden_states[sample_idx].item()
-                        samples.append(
-                            SequenceOutput(
-                                parent_seq_id=seq_id,
-                                output_token=token_id,
-                                logprobs={token_id: Logprob(token_id)}))
-                        sample_idx += 1
-                    res.append(
-                        CompletionSequenceGroupOutput(samples=samples,
-                                                      prompt_logprobs=None))
-                next_tokens = SamplerOutput(outputs=res)
-        else:
-            next_tokens = self.sampler(None, hidden_states, sampling_metadata)
-        return next_tokens
-
-    def load_weights(self, model_name_or_path: str, **kwargs):
-        arch = _get_model_architecture(self.config)
-        neuronx_module_path, neuronx_model_cls_name = (
-            _NEURON_SUPPORTED_MODELS[arch])
-        neuronx_module = importlib.import_module(neuronx_module_path)
-        neuronx_model_cls = getattr(neuronx_module, neuronx_model_cls_name)
-        neuron_config = neuronx_model_cls.get_neuron_config_cls()(
-            **kwargs['neuron_config'])
-        self.config.neuron_config = neuron_config
-        logger.info("neuron_config buckets: %s",
-                    self.config.neuron_config.buckets)
-        # TODO: modify this part to read vision neuron config from NxDI
-        override_neuron_config = kwargs["override_neuron_config"]
-        vision_neuron_config = neuronx_model_cls.get_neuron_config_cls()(
-            **kwargs['neuron_config'])
-        vision_neuron_config.tp_degree = override_neuron_config.get("vision_neuron_config.tp_degree", 16)
-        vision_neuron_config.torch_dtype = override_neuron_config.get("vision_neuron_config.torch_dtype", torch.float16)
-        vision_neuron_config.buckets = override_neuron_config.get("vision_neuron_config.buckets", [12 * 1024])
-        vision_neuron_config.batch_size = override_neuron_config.get("vision_neuron_config.batch_size", 1)
-        config = neuronx_model_cls.get_config_cls()(
-            text_neuron_config=neuron_config,
-            vision_neuron_config=vision_neuron_config,
-            load_config=load_pretrained_config(model_name_or_path))
-        hashed_config = hashlib.md5(
-            config.to_json_string().encode('utf-8')).hexdigest()
-        if os.getenv("NEURON_COMPILED_ARTIFACTS") is not None:
-            compiled_model_path = os.getenv("NEURON_COMPILED_ARTIFACTS")
-        elif os.path.exists(model_name_or_path):
-            compiled_model_path = os.path.join(model_name_or_path,
-                                               "neuron-compiled-artifacts",
-                                               hashed_config)
-        else:
-            compiled_model_path = os.path.join("local-models",
-                                               model_name_or_path,
-                                               "neuron-compiled-artifacts",
-                                               hashed_config)
-        try:
-            self.model = neuronx_model_cls(compiled_model_path)
-            tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
-            self.vision_token_id = tokenizer(
-                "<|image|>", add_special_tokens=False).input_ids[0]
-            self.model.load(compiled_model_path)
-            return
-        except (FileNotFoundError, ValueError):
-            logger.warning("Failed to load the model from %s, Recompiling...",
-                           compiled_model_path)
-        if not os.path.exists(model_name_or_path):
-            hf_model = AutoModelForCausalLM.from_pretrained(model_name_or_path)
-            saved_path = os.path.join("local-models", model_name_or_path)
-            hf_model.save_pretrained(saved_path)
-            model_name_or_path = saved_path
-        self.model = neuronx_model_cls(model_name_or_path, config)
-
-        logger.info("\nCompiling and saving model to %s", model_name_or_path)
-        self.model.compile(compiled_model_path)
-
-        tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
-        tokenizer.save_pretrained(compiled_model_path)
-        logger.info("Successfully compiled and saved the model in %s",
-                    compiled_model_path)
-
-        # Read "<|image|>" token_id from the tokenizer
-        self.vision_token_id = tokenizer("<|image|>",
-                                         add_special_tokens=False).input_ids[0]
-        logger.info("\nLoading model from compiled checkpoint...")
-        self.model.load(compiled_model_path)
 
 class NeuronSpeculationCausalLM(NeuronBase):
     """A Neuron-optimized causal language model with speculative decoding."""
@@ -1011,8 +786,6 @@ def get_neuron_model(model_config: ModelConfig, cache_config: CacheConfig,
     model_arch = _get_model_architecture(model_config.hf_config)
     if model_arch == "MllamaForConditionalGeneration":
         model = NeuronMllamaForCausalLM(model_config.hf_config)
-    elif model_arch == "LlavaForConditionalGeneration":
-        model = NeuronPixtralForCausalLM(model_config.hf_config)
     else:
         model = NeuronCausalLM(model_config.hf_config)
     default_neuron_config_args = _get_default_neuron_config(
