@@ -207,20 +207,8 @@ class NeuronBuffer:
                 if entry.token_transfer_status != Status.DONE:
                     return False
             else:
-                # initiate token lookup with higher priority
-                # as the token should be ready soon once KV cache
-                # are all transferred. And new KV cache transfer shouldn't
-                # start before that.
-                if entry.token_transfer_status == Status.NOT_STARTED:
-                    self.lookup_queue.put(
-                        LookupTask("lookup_token",
-                                   request_id,
-                                   entry,
-                                   priority=0))
-                    entry.token_transfer_status = Status.PENDING
-                    return False
-
-                elif entry.token_transfer_status == Status.PENDING:
+                if entry.token_transfer_status ==  Status.NOT_STARTED or \
+                        entry.token_transfer_status == Status.PENDING:
                     return False
                 else:
                     assert entry.output_token is not None
@@ -292,22 +280,22 @@ class SendBuffer(NeuronBuffer):
                     if self.per_layer_kv_transfer else 0,
                 is_block_kv_layout=self.is_block_kv_layout)
 
-    def _process_lookup_token(self, identity, request):
-        request_id = request["request_id"]
-
-        if request_id not in self.lookup_dict or \
-            self.lookup_dict[request_id].output_token is None:
-            self.router.send_json(identity, {"success": False})
-            return
-
-        entry = self.lookup_dict[request_id]
-
-        self.router.send_json(identity, {
-            "success": True,
-            "output_token": entry.output_token.item()
-        })
-
-        entry.token_transfer_status = Status.DONE
+        # wait until token gets ready and send over immediately
+        if self.per_layer_kv_transfer:
+            logger.debug(
+                "[SendBuffer %s] pending token " \
+                "to ready")
+            while entry.output_token is None:
+                time.sleep(0.001)
+            logger.debug(
+                "[SendBuffer %s] sending token " \
+                "to peer %s",
+                self.buffer_id, identity_str)
+            self.router.send_json(identity, {
+                "success": True,
+                "output_token": entry.output_token.item()
+            })
+            entry.token_transfer_status = Status.DONE
 
     def send_handler(self):
         logger.info("[SendBuffer %s] start send_handler thread",
@@ -357,10 +345,6 @@ class SendBuffer(NeuronBuffer):
 
                 if request["type"] == "lookup_all":
                     self._process_lookup_all(identity, request)
-                    continue
-
-                if request["type"] == "lookup_token":
-                    self._process_lookup_token(identity, request)
                     continue
 
                 raise Exception(f"invalid request type {request['type']}")
@@ -453,6 +437,36 @@ class RecvBuffer(NeuronBuffer):
             completion_token=entry.completion_token,
             is_block_kv_layout=self.is_block_kv_layout)
 
+
+        # should expect token right away
+        if self.per_layer_kv_transfer:
+            logger.debug(
+                "[RecvBuffer %s] pending to get token " \
+                "from peer %s:%s",
+                self.buffer_id, self.zmq_ip, self.zmq_port)
+            response = self.dealer.recv_json()
+            logger.debug(
+                "[RecvBuffer %s] got success lookup token response %s " \
+                "from peer %s:%s",
+                self.buffer_id, response, self.zmq_ip, self.zmq_port)
+            entry.output_token = torch.tensor(
+                response["output_token"]).unsqueeze(0)
+            entry.token_transfer_status = Status.DONE
+
+        logger.debug(
+                "[RecvBuffer %s] pending to receive all KV " \
+                "from peer %s:%s",
+                self.buffer_id, self.zmq_ip, self.zmq_port)
+        while not entry.completion_token.is_done():
+                time.sleep(0.001)
+
+        logger.debug(
+                "[RecvBuffer %s] received all KV " \
+                "from peer %s:%s",
+                self.buffer_id, self.zmq_ip, self.zmq_port)
+        
+
+
     def _process_lookup_token(self, entry, response):
         logger.debug(
             "[RecvBuffer %s] got success lookup token response %s " \
@@ -496,6 +510,7 @@ class RecvBuffer(NeuronBuffer):
                         self._process_lookup_all(task.entry, response)
                     else:
                         self._process_lookup_token(task.entry, response)
+                        
                 else:
                     logger.debug(
                         "[RecvBuffer %s] lookup [%s] with request_id [%s]"
