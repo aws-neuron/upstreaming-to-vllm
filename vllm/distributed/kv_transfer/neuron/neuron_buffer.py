@@ -46,8 +46,7 @@ class LookupEntry:
 
 class LookupTask:
 
-    def __init__(self, request_type, request_id, entry, priority=1):
-        self.priority = priority
+    def __init__(self, request_type, request_id, entry):
         self.request_type = request_type
         self.request_id = request_id
         self.entry = entry
@@ -55,10 +54,6 @@ class LookupTask:
     def __str__(self):
         return f"Task(request_type={self.request_type}, \
             request_id={self.request_id})"
-
-    def __lt__(self, other):
-        return self.priority < other.priority
-
 
 class NeuronBuffer:
 
@@ -98,7 +93,7 @@ class NeuronBuffer:
         self.kv_map = None
 
         self.lookup_dict = {}
-        self.lookup_queue: queue.PriorityQueue = queue.PriorityQueue()
+        self.lookup_queue = queue.Queue()
 
         # Try to load kv_map_path from kv_transfer_config if specified
         if kv_map_path:
@@ -405,7 +400,7 @@ class RecvBuffer(NeuronBuffer):
             completion_token=torch.classes.neuron.CompletionToken())
         self.lookup_dict[request_id] = entry
         self.lookup_queue.put(
-            LookupTask("lookup_all", request_id, entry, priority=1))
+            LookupTask("lookup_all", request_id, entry))
 
     def _process_lookup_all(self, entry, response):
         logger.debug(
