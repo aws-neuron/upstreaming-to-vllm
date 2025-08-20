@@ -14,7 +14,6 @@ from neuronx_distributed_inference.modules.lora_serving import (
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer import get_kv_transfer_group
-from vllm.entrypoints.openai.serving_models import LoRAModulePath
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
@@ -37,7 +36,9 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
         vllm_config: VllmConfig,
     ):
         super().__init__(vllm_config)
-        self.neuron_multimodal_models = ["MllamaForConditionalGeneration", "LlavaForConditionalGeneration"]
+        self.neuron_multimodal_models = [
+            "MllamaForConditionalGeneration", "LlavaForConditionalGeneration"
+        ]
         self.lora_checkpoint = None
         self.model = None
         self.lora_serving_config = None
@@ -51,17 +52,11 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
         self.is_chunked_prefill = False
         self.use_custom_seq_id_mapping = False
 
-    @staticmethod
-    def _get_lora_paths_strings(lora_modules: List[LoRAModulePath]):
-        if not lora_modules:
-            return None
-        return {_.get("name"): _.get("path") for _ in lora_modules}
-
     def _get_nxdi_lora_config(self):
         override_neuron_config = self.model_config.override_neuron_config
         lora_modules = override_neuron_config.pop("lora_modules", None)
         target_modules = override_neuron_config.pop("target_modules", None)
-        lora_ckpt_paths = self._get_lora_paths_strings(lora_modules)
+        lora_ckpt_paths = lora_modules
         if self.lora_config.max_loras < len(lora_ckpt_paths):
             raise ValueError(
                 "Number of LoRAs (%s) exceeds maximum "
@@ -225,11 +220,11 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
                 adapter_ids=model_input.adapter_ids,
                 prefill_completion_state=model_input.prefill_completion_state,
                 **MultiModalKwargs.as_kwargs(model_input.multi_modal_kwargs
-                                                or {},
-                                                dtype=self.model_config.dtype,
-                                                device=self.device),
+                                             or {},
+                                             dtype=self.model_config.dtype,
+                                             device=self.device),
             )
-        
+
         if self.need_send_kv_ahead(model_input):
             get_kv_transfer_group().set_output_token(model_input,
                                                      hidden_states)
@@ -270,7 +265,6 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
             model_input.sampling_metadata,
         )
         return output
-        
 
     def execute_model_for_multimodal_models(
         self,
@@ -292,14 +286,14 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
         return [output]
 
     def process_multi_modal_data_neuron_llava(self, mm_data):
-        # We reconstuct image_sizes here to match HF's implementation 
+        # We reconstruct image_sizes here to match HF's implementation
         # since VLLM implementation slices pixel_values for each image separately
         # (see vllm/model_executor/models/llava.py)
         img_height = mm_data["pixel_values"].shape[2]
         img_width = mm_data["pixel_values"].shape[3]
         mm_data["image_sizes"] = torch.tensor([img_height, img_width], dtype=torch.int32)
         return mm_data
-    
+
     def process_multi_modal_data_neuron_mllama(self, mm_data):
         # Neuron uses aspect_ratios instead of aspect_ratio_ids
         all_supported_aspect_ratios = get_all_supported_aspect_ratios(
@@ -329,8 +323,10 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
         elif self.model.config.model_type == 'mllama':
             return self.process_multi_modal_data_neuron_mllama(mm_data)
         else:
-            raise NotImplementedError(f"processing mm data for model type {self.model.config.model_type} not supported on Neuron yet!")
-        
+            raise NotImplementedError(
+                f"processing mm data for model type {self.model.config.model_type} not supported on Neuron yet!"
+            )
+
     def _get_lora_adapter_ids(self, seq_group_metadata_list):
         # set LoRA adapter IDs for multi-lora serving
         batch_size = len(seq_group_metadata_list)
