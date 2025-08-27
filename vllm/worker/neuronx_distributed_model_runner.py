@@ -92,7 +92,7 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
             self.model.neuron_config.chunked_prefill_config is not None
         self.model.is_reorder_needed = not self.is_block_kv_layout
 
-        if self.vllm_config.kv_transfer_config.per_layer_kv_transfer:
+        if self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.per_layer_kv_transfer:
             assert self.model.config.neuron_config.skip_warmup, \
                 ("Model warmups must be turned off when using per_layer_kv_transfer. "
                 "Model warmups can be turrned off by setting override-neuron-config 'skip_warmup'=true.")
