@@ -1081,7 +1081,7 @@ def _get_default_neuron_config(model_config: ModelConfig,
         torch_dtype=TORCH_DTYPE_TO_NEURON_AMP[model_config.dtype],
         padding_side="right",
         on_device_sampling_config=on_device_sampling_config,
-        lora_serving_config=lora_serving_config,
+        lora_config=lora_serving_config,
         pa_num_blocks=max_num_blocks,
         pa_block_size=cache_config.block_size,
         is_block_kv_layout=(scheduler_config.chunked_prefill_enabled
