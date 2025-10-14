@@ -4,8 +4,8 @@
 # Dependencies for Neuron devices
 packaging>=24.2
 setuptools>=77.0.3,<80.0.0
-torch-neuronx >= 2.5.0
-neuronx-cc>=2.0.0a0
+torch-neuronx==2.8.0.2.10.13553
+neuronx-cc==2.21.18209.0
 torchvision # Required for Llama3.2 multimodal image preprocessing
 h11>=0.16.0
 pillow>=11.3.0
