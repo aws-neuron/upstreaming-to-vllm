@@ -67,7 +67,7 @@ class DeviceConfig:
                 self.device_type = self.device.type
 
         # Some device types require processing inputs on CPU
-        if self.device_type in ["tpu", "neuron"]:
+        if self.device_type in ["tpu"]:
             self.device = None
         else:
             # Set device with device type
