@@ -214,6 +214,10 @@ async def _handle_completions(api: str, request: Request):
         response_json = response.json()
         kv_transfer_params = response_json.get('kv_transfer_params', {})
         if kv_transfer_params:
+            kv_transfer_params['remote_host'] = global_args.prefiller_hosts[0]
+            # tp_size in kv_transfer_params get from prefill node will be 32,
+            # by popping it, we can use the default tp=1 again in nixl connector.
+            kv_transfer_params.pop("tp_size", None)
             req_data["kv_transfer_params"] = kv_transfer_params
 
         # Get the next decode client in round-robin fashion

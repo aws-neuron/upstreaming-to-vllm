@@ -70,6 +70,7 @@ _NIXL_SUPPORTED_DEVICE = {
     "cuda": ("cuda", ),
     "tpu": ("cpu", ),
     "xpu": ("cpu", ),
+    "neuron": ("cpu", ),
 }
 # support for oot platform by providing mapping in current_platform
 _NIXL_SUPPORTED_DEVICE.update(current_platform.get_nixl_supported_devices())
@@ -707,6 +708,8 @@ class NixlConnectorWorker:
     def _background_nixl_handshake(self, req_id: str,
                                    remote_engine_id: EngineId, meta: ReqMeta):
         # Do NIXL handshake in background and add to _ready_requests when done.
+        logger.debug("Starting NIXL handshake for req %s to remote engine %s with meta %s",
+                     req_id, remote_engine_id, meta)
         fut = self._handshake_futures.get(remote_engine_id)
         if fut is None:
             fut = self._handshake_initiation_executor.submit(
