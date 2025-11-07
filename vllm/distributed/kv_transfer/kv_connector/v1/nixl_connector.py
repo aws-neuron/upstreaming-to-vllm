@@ -82,7 +82,7 @@ class NixlAgentMetadata(
         dict=True):
     engine_id: str
     agent_metadata: bytes
-    kv_caches_base_addr: list[int]
+    kv_caches_base_addr: dict[int, int]
     num_blocks: int
     block_lens: list[int]
     attn_backend_name: str
@@ -480,7 +480,8 @@ class NixlConnectorWorker:
             config = nixl_agent_config(backends=self.nixl_backends) if len(
                 non_ucx_backends) > 0 else nixl_agent_config(num_threads=8)
 
-        self.nixl_wrapper = NixlWrapper(str(uuid.uuid4()), config)
+        self._nixl_wrapper = None
+        self._nixl_config = config
         # Map of engine_id -> {rank0: agent_name0, rank1: agent_name1..}.
         self._remote_agents: dict[EngineId, dict[int, str]] = defaultdict(dict)
 
@@ -602,6 +603,12 @@ class NixlConnectorWorker:
         # finish reading before safely freeing the blocks.
         self.consumer_notification_counts_by_req = defaultdict[ReqId, int](int)
         self.xfer_stats = NixlKVConnectorStats()
+
+    @property
+    def nixl_wrapper(self):
+        if self._nixl_wrapper is None:
+           self._nixl_wrapper = NixlWrapper(str(uuid.uuid4()), self._nixl_config)
+        return self._nixl_wrapper
 
     @staticmethod
     def _nixl_handshake_listener(metadata: NixlAgentMetadata,
@@ -754,6 +761,7 @@ class NixlConnectorWorker:
         caches_data = []
         # With hybrid allocator, layers can share a kv cache tensor
         seen_base_addresses = []
+        seen_base_addresses_dict = {}
 
         # Note(tms): I modified this from the original region setup code.
         # K and V are now in different regions. Advantage is that we can
@@ -779,7 +787,9 @@ class NixlConnectorWorker:
                 if base_addr in seen_base_addresses:
                     continue
 
+                device_id = max(cache.get_device(), 0)
                 seen_base_addresses.append(base_addr)
+                seen_base_addresses_dict[base_addr] = device_id
                 curr_tensor_size_bytes = cache.numel() * cache.element_size()
 
                 if tensor_size_bytes is None:
@@ -799,14 +809,14 @@ class NixlConnectorWorker:
                     assert tensor_size_bytes == curr_tensor_size_bytes, \
                         "All kv cache tensors must have the same size"
                 caches_data.append(
-                    (base_addr, curr_tensor_size_bytes, self.tp_rank, ""))
+                    (base_addr, curr_tensor_size_bytes, device_id, ""))
 
         logger.debug("Different block lengths collected: %s",
                      set(self.block_len_per_layer))
         assert len(self.block_len_per_layer) == len(seen_base_addresses)
         assert self.num_blocks != 0
 
-        self.kv_caches_base_addr[self.engine_id] = seen_base_addresses
+        self.kv_caches_base_addr[self.engine_id] = seen_base_addresses_dict
         self.num_regions = len(caches_data)
         self.num_layers = len(xfer_buffers.keys())
 
@@ -845,7 +855,9 @@ class NixlConnectorWorker:
                 block_offset = block_id * self.block_len_per_layer[i]
                 addr = base_addr + block_offset
                 # (addr, len, device id)
-                blocks_data.append((addr, kv_block_len, self.tp_rank))
+                # get the proper device_id
+                device_id = seen_base_addresses_dict[base_addr]
+                blocks_data.append((addr, kv_block_len, device_id))
 
             if self._use_flashinfer:
                 # Separate and interleave K/V regions to maintain the same
@@ -1023,7 +1035,7 @@ class NixlConnectorWorker:
         assert len(nixl_agent_meta.kv_caches_base_addr) == len(
             self.block_len_per_layer)
         # Register all remote blocks, but only the corresponding kv heads.
-        for i, base_addr in enumerate(nixl_agent_meta.kv_caches_base_addr):
+        for i, base_addr in enumerate(nixl_agent_meta.kv_caches_base_addr.keys()):
             kv_block_len = self.get_backend_aware_kv_block_len(layer_idx=i)
             rank_offset = self.tp_rank % tp_ratio * kv_block_len \
                 if not (self.use_mla or is_kv_replicated) else 0
@@ -1034,7 +1046,7 @@ class NixlConnectorWorker:
                 # self.block_len == remote_block_len//tp_ratio bytes.
                 addr = base_addr + block_offset + rank_offset
                 # (addr, len, device id)
-                blocks_data.append((addr, kv_block_len, remote_tp_rank))
+                blocks_data.append((addr, kv_block_len, nixl_agent_meta.kv_caches_base_addr[base_addr]))
 
             if self._use_flashinfer:
                 # With FlashInfer index V separately to allow head splitting.
